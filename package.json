@@ -1,0 +1,48 @@
+{
+  "name": "open-sidebar",
+  "version": "1.2.0",
+  "description": "Directory browsing and pinned project scripts for the OpenCode TUI",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "main": "dist/sidebar.js",
+  "types": "dist/sidebar.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "pack:check": "npm run build && npm pack --dry-run"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "tui",
+    "sidebar"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.18.0",
+    "@opentui/core": ">=0.4.5",
+    "@opentui/keymap": ">=0.4.5",
+    "@opentui/solid": ">=0.4.5"
+  },
+  "dependencies": {
+    "solid-js": "1.9.12"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.18.4",
+    "@opentui/core": "^0.4.5",
+    "@opentui/keymap": "^0.4.5",
+    "@opentui/solid": "^0.4.5",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}
