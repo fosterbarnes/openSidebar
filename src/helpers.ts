@@ -3,10 +3,33 @@ import path from "node:path"
 
 const IGNORED_DIRECTORIES = new Set([".git", "node_modules", "dist", "build", "coverage"])
 const MAX_TREE_ITEMS = 80
+export const MAX_RECENT_ROOTS = 8
 const PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"])
 
 export type Script = { name: string; command: string; filePath?: string }
 export type TreeEntry = { name: string; relativePath: string; fullPath: string; directory: boolean; depth: number }
+export type RootSections = { recentRoots: string[]; favoriteRoots: string[] }
+
+export function isDirectory(value: string): boolean {
+  try {
+    return fs.statSync(value).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+export function rootSections(
+  customRoots: readonly string[],
+  favoriteRoots: readonly string[],
+  isValid: (root: string) => boolean = isDirectory,
+): RootSections {
+  const favorites = [...new Set(favoriteRoots)].filter(isValid)
+  const favoriteSet = new Set(favorites)
+  const recentRoots = [...new Set(customRoots)]
+    .filter((root) => isValid(root) && !favoriteSet.has(root))
+    .slice(0, MAX_RECENT_ROOTS)
+  return { recentRoots, favoriteRoots: favorites }
+}
 
 function packageManager(directory: string): string {
   try {

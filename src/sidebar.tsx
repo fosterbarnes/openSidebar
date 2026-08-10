@@ -1,9 +1,9 @@
 import { For, Show, createMemo, createSignal } from "solid-js"
-import type { TuiPlugin, TuiPluginModule, TuiPromptRef } from "@opencode-ai/plugin/tui"
+import type { TuiDialogSelectProps, TuiPlugin, TuiPluginModule, TuiPromptRef } from "@opencode-ai/plugin/tui"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { readScripts, readTree, type Script } from "./helpers.js"
+import { isDirectory, readScripts, readTree, rootSections, type Script } from "./helpers.js"
 import { probeOpenAIUsage, type OpenAIUsage } from "./usage.js"
 import { runScript as runNativeScript } from "./script-runner.js"
 
@@ -12,6 +12,8 @@ const DIRECTORY_INDICATOR_COLORS = ["#DCCF99", "#D5C184", "#CEB56F", "#C7A95A", 
 const MAX_TREE_ITEMS = 80
 const ADD_ROOT = "__sidebar_add_custom_root__"
 const RESET_ROOT = "__sidebar_reset_project_root__"
+const RECENT_ROOTS = "__sidebar_recent_custom_roots__"
+const FAVORITE_ROOTS = "__sidebar_favorite_custom_roots__"
 const USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000
 const MODEL_STATE_PATH = path.join(process.env.XDG_STATE_HOME ?? path.join(os.homedir(), ".local", "state"), "opencode", "model.json")
 
@@ -34,20 +36,16 @@ function pinKey(worktree: string): string {
   return `opencode-sidebar-tools:pins:${worktree}`
 }
 
+function rootPinKey(worktree: string): string {
+  return `opencode-sidebar-tools:file-root-pins:${worktree}`
+}
+
 function rootsKey(sessionID: string): string {
   return `opencode-sidebar-tools:file-roots:${sessionID}`
 }
 
 type RootState = { customRoots: string[]; activeRoot?: string }
 type SelectedModel = { providerID: string; modelID: string }
-
-function isDirectory(value: string): boolean {
-  try {
-    return fs.statSync(value).isDirectory()
-  } catch {
-    return false
-  }
-}
 
 function loadRootState(api: Parameters<TuiPlugin>[0], sessionID: string): RootState {
   const value = api.kv.get<unknown>(rootsKey(sessionID), {})
@@ -65,6 +63,11 @@ function loadRootState(api: Parameters<TuiPlugin>[0], sessionID: string): RootSt
 function loadPins(api: Parameters<TuiPlugin>[0], worktree: string): Set<string> {
   const value = api.kv.get<unknown>(pinKey(worktree), [])
   return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [])
+}
+
+function loadRootPins(api: Parameters<TuiPlugin>[0], worktree: string): Set<string> {
+  const value = api.kv.get<unknown>(rootPinKey(worktree), [])
+  return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && isDirectory(item)) : [])
 }
 
 function commandId(prefix: string, value: string): string {
@@ -145,6 +148,7 @@ const tui: TuiPlugin = async (api) => {
   const [expanded, setExpanded] = createSignal<Set<string>>(new Set(["."]))
   const [tree, setTree] = createSignal(readTree(root, expanded()))
   let pins = loadPins(api, project)
+  let rootPins = loadRootPins(api, project)
   let usageRunning = false
   const usageAbort = new AbortController()
   let modelStateWatcher: fs.FSWatcher | undefined
@@ -189,6 +193,7 @@ const tui: TuiPlugin = async (api) => {
     rootState = loadRootState(api, sessionID)
     root = rootState.activeRoot || project
     pins = loadPins(api, project)
+    rootPins = loadRootPins(api, project)
     setScriptsOpen(true)
     setFilesOpen(true)
     setExpanded(new Set(["."]))
@@ -207,8 +212,12 @@ const tui: TuiPlugin = async (api) => {
   const saveRootState = () => api.kv.set(rootsKey(sessionID), rootState)
   const setRoot = (nextRoot: string) => {
     root = nextRoot
+    const customRoots = nextRoot === project
+      ? rootState.customRoots
+      : [nextRoot, ...rootState.customRoots]
+    const sections = rootSections(customRoots, [...rootPins])
     rootState = {
-      customRoots: nextRoot === project ? rootState.customRoots : [...new Set([...rootState.customRoots, nextRoot])],
+      customRoots: [...sections.recentRoots, ...sections.favoriteRoots],
       activeRoot: nextRoot === project ? undefined : nextRoot,
     }
     saveRootState()
@@ -222,6 +231,16 @@ const tui: TuiPlugin = async (api) => {
     else pins.add(name)
     savePins()
     api.ui.toast({ variant: "success", message: `${pins.has(name) ? "Pinned" : "Unpinned"} script: ${name}` })
+  }
+  const saveRootPins = () => api.kv.set(rootPinKey(project), [...rootPins].sort())
+  const toggleRootPin = (customRoot: string) => {
+    if (rootPins.has(customRoot)) rootPins.delete(customRoot)
+    else rootPins.add(customRoot)
+    const sections = rootSections(rootState.customRoots, [...rootPins])
+    rootState = { ...rootState, customRoots: [...sections.recentRoots, ...sections.favoriteRoots] }
+    saveRootState()
+    saveRootPins()
+    api.ui.toast({ variant: "success", message: `${rootPins.has(customRoot) ? "Pinned" : "Unpinned"} root: ${customRoot}` })
   }
   const runScript = async (script: Script) => {
     const current = api.route.current
@@ -327,25 +346,46 @@ const tui: TuiPlugin = async (api) => {
     },
     onCancel: () => api.ui.dialog.clear(),
   }))
-  const selectRoot = () => api.ui.dialog.replace(() => api.ui.DialogSelect({
-    title: "Switch file root",
-    options: [
-      { title: `Project: ${project}`, value: project },
-      ...rootState.customRoots.map((customRoot) => ({ title: customRoot, value: customRoot })),
-      { title: "Add custom root...", value: ADD_ROOT },
+  const selectRoot = () => {
+    const sections = rootSections(rootState.customRoots, [...rootPins])
+    const options = [
+      { title: "Add custom dir...", value: ADD_ROOT },
+      { title: "Recent", value: RECENT_ROOTS },
+      ...sections.recentRoots.map((customRoot) => ({
+        title: customRoot,
+        value: customRoot,
+        category: "Recent",
+        footer: rootPins.has(customRoot) ? "* pinned" : "pin",
+      })),
+      { title: "Favorite", value: FAVORITE_ROOTS },
+      ...sections.favoriteRoots.map((customRoot) => ({
+        title: customRoot,
+        value: customRoot,
+        category: "Favorite",
+        footer: "* pinned",
+      })),
       { title: "Reset to project root", value: RESET_ROOT },
-    ],
-    current: root,
-    onSelect: (option) => {
-      if (option.value === ADD_ROOT) promptForRoot()
-      else {
-        setRoot(option.value === RESET_ROOT ? project : option.value)
-        api.ui.dialog.clear()
-      }
-    },
-  }))
+    ]
+    const dialogProps = {
+      title: `Project: ${project}`,
+      skipFilter: true,
+      options,
+      current: ADD_ROOT,
+      onSelect: (option: (typeof options)[number]) => {
+        if (option.value === ADD_ROOT) promptForRoot()
+        else if (option.value !== RECENT_ROOTS && option.value !== FAVORITE_ROOTS) {
+          setRoot(option.value === RESET_ROOT ? project : option.value)
+          api.ui.dialog.clear()
+        }
+      },
+    // OpenCode supports renderFilter at runtime; the installed plugin types lag behind it.
+    } as unknown as TuiDialogSelectProps<string>
+    api.ui.dialog.replace(() => api.ui.DialogSelect(dialogProps))
+  }
+  const openRootPicker = () => setTimeout(selectRoot, 100)
 
   const disposers: Array<() => void> = []
+  const rootCommands = rootSections(rootState.customRoots, [...rootPins])
   const commands = [
     {
       name: "sidebar.refresh",
@@ -375,6 +415,20 @@ const tui: TuiPlugin = async (api) => {
       namespace: "sidebar",
       run: () => setRoot(project),
     },
+    ...rootCommands.favoriteRoots.map((customRoot) => ({
+      name: commandId("file-root-pin", customRoot),
+      title: `Unpin file root: ${customRoot}`,
+      category: "Project files",
+      namespace: "sidebar",
+      run: () => toggleRootPin(customRoot),
+    })),
+    ...rootCommands.recentRoots.map((customRoot) => ({
+      name: commandId("file-root-pin", customRoot),
+      title: `Pin file root: ${customRoot}`,
+      category: "Project files",
+      namespace: "sidebar",
+      run: () => toggleRootPin(customRoot),
+    })),
     ...scripts().flatMap((script) => [
       {
         name: commandId("run", script.name),
@@ -549,21 +603,38 @@ const tui: TuiPlugin = async (api) => {
               paddingRight={1}
               onMouseOver={() => setHovered("files")}
               onMouseOut={() => setHovered()}
+              onMouseDown={(event) => {
+                if (event.button === 0) {
+                  openRootPicker()
+                }
+              }}
             >
               <text
                 fg={hovered() === "files" ? hoverColor : api.theme.current.text}
-                onMouseDown={() => setFilesOpen((open) => !open)}
-              >{filesOpen() ? "-" : "+"}</text>
-              <box
-                flexDirection="row"
-                gap={1}
-                onMouseUp={(event) => {
-                  if (event.button === 0) selectRoot()
+                onMouseDown={(event) => {
+                  event.stopPropagation()
+                  setFilesOpen((open) => !open)
                 }}
-              >
-                <text fg={hovered() === "files" ? hoverColor : api.theme.current.accent}><b>files</b></text>
-                <text fg={hovered() === "files" ? hoverColor : api.theme.current.textMuted}>[{path.basename(root)}]</text>
-              </box>
+                onMouseUp={(event) => event.stopPropagation()}
+              >{filesOpen() ? "-" : "+"}</text>
+              <text
+                fg={hovered() === "files" ? hoverColor : api.theme.current.accent}
+                onMouseDown={(event) => {
+                  if (event.button === 0) {
+                    event.stopPropagation()
+                    openRootPicker()
+                  }
+                }}
+              ><b>files</b></text>
+              <text
+                fg={hovered() === "files" ? hoverColor : api.theme.current.textMuted}
+                onMouseDown={(event) => {
+                  if (event.button === 0) {
+                    event.stopPropagation()
+                    openRootPicker()
+                  }
+                }}
+              >[{path.basename(root)}]</text>
             </box>
             <Show when={filesOpen()}>
               <text fg={api.theme.current.textMuted}>{root}</text>

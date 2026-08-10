@@ -3,7 +3,7 @@ import test from "node:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { readScripts, readTree } from "../src/helpers.ts"
+import { MAX_RECENT_ROOTS, readScripts, readTree, rootSections } from "../src/helpers.ts"
 import { probeOpenAIUsage, resolveAuthPath } from "../src/usage.ts"
 import { commandArgs } from "../src/script-runner.ts"
 
@@ -172,4 +172,29 @@ test("expands directories beyond the old shallow depth limit", () => {
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test("orders recent roots and keeps favorites outside the recent limit", () => {
+  const roots = Array.from({ length: MAX_RECENT_ROOTS + 2 }, (_, index) => `root-${MAX_RECENT_ROOTS + 1 - index}`)
+  const sections = rootSections(roots, ["root-0", "root-0", "root-9"], () => true)
+  assert.deepEqual(sections.favoriteRoots, ["root-0", "root-9"])
+  assert.deepEqual(sections.recentRoots, [
+    "root-8",
+    "root-7",
+    "root-6",
+    "root-5",
+    "root-4",
+    "root-3",
+    "root-2",
+    "root-1",
+  ])
+})
+
+test("filters stale roots and removes duplicate recent entries", () => {
+  const sections = rootSections(
+    ["missing", "valid", "valid", "favorite"],
+    ["favorite", "stale"],
+    (root) => root === "valid" || root === "favorite",
+  )
+  assert.deepEqual(sections, { recentRoots: ["valid"], favoriteRoots: ["favorite"] })
 })
