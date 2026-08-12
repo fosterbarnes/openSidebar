@@ -5,7 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { defaultScriptSettings, MAX_RECENT_ROOTS, normalizeExtension, normalizeScriptSettings, parseLauncher, readScripts, readTree, rootSections } from "../src/helpers.ts"
 import { probeOpenAIUsage, resolveAuthPath } from "../src/usage.ts"
-import { commandArgs, scriptCommand, weztermArgs } from "../src/script-runner.ts"
+import { commandArgs, scriptCommand, weztermArgs, weztermSendArgs } from "../src/script-runner.ts"
 
 test("reads sorted package scripts", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-tools-"))
@@ -236,6 +236,12 @@ test("maps WezTerm terminal choices to CLI placement arguments", () => {
   assert.deepEqual(weztermArgs("wezterm-window", "C:\\work"), ["cli", "spawn", "--new-window", "--cwd", "C:\\work"])
   assert.deepEqual(weztermArgs("wezterm-horizontal", "C:\\work", { Percent: 30 }), ["cli", "split-pane", "--horizontal", "--percent", "30", "--cwd", "C:\\work"])
   assert.deepEqual(weztermArgs("wezterm-vertical", "C:\\work", { Cells: 20 }), ["cli", "split-pane", "--bottom", "--cells", "20", "--cwd", "C:\\work"])
+})
+
+test("places commands without submitting them and submits only when running", () => {
+  const script = { name: "build", command: "npm run build", terminal: "wezterm-tab" as const, launcher: { executable: "pwsh", args: [] }, weztermSize: { Percent: 50 } }
+  assert.deepEqual(weztermSendArgs(script, "7", false), ["cli", "send-text", "--pane-id", "7", "--no-paste", "npm run build"])
+  assert.deepEqual(weztermSendArgs(script, "7", true), ["cli", "send-text", "--pane-id", "7", "--no-paste", "npm run build\r"])
 })
 
 test("discovers only enabled configured script extensions", () => {

@@ -88,16 +88,20 @@ function spawnWezterm(commandArgs: string[], cwd: string): Promise<{ paneID?: st
   })
 }
 
-async function runWezterm(script: Script, cwd: string, terminal: Exclude<ScriptTerminal, "native">): Promise<RunResult> {
+export function weztermSendArgs(script: Script, paneID: string, submit: boolean): string[] {
+  return ["cli", "send-text", "--pane-id", paneID, "--no-paste", `${scriptCommand(script)}${submit ? "\r" : ""}`]
+}
+
+async function runWezterm(script: Script, cwd: string, terminal: Exclude<ScriptTerminal, "native">, submit: boolean): Promise<RunResult> {
   if (!await available(weztermCommand())) return { target: "WezTerm", error: "Executable not found: wezterm" }
   const pane = await spawnWezterm(weztermArgs(terminal, cwd, script.weztermSize), cwd)
   if (!pane.paneID) return { target: "WezTerm", error: pane.error || "Could not create a WezTerm pane." }
-  const sent = await runCommand(weztermCommand(), ["cli", "send-text", "--pane-id", pane.paneID, "--no-paste", `${scriptCommand(script)}\r`], cwd)
+  const sent = await runCommand(weztermCommand(), weztermSendArgs(script, pane.paneID, submit), cwd)
   return sent.error ? { target: "WezTerm", error: sent.error } : { target: "WezTerm" }
 }
 
 export async function runScript(script: Script, cwd: string): Promise<RunResult> {
-  if (script.terminal !== "native") return runWezterm(script, cwd, script.terminal)
+  if (script.terminal !== "native") return runWezterm(script, cwd, script.terminal, true)
   const target = script.filePath || script.command
   if (!await available(script.launcher.executable)) {
     return { target: script.launcher.executable, error: `Executable not found: ${script.launcher.executable}` }
@@ -108,6 +112,11 @@ export async function runScript(script: Script, cwd: string): Promise<RunResult>
     ? ["/d", "/c", "start", "", script.launcher.executable, ...args]
     : args
   return spawnCommand(command, commandArgs, cwd)
+}
+
+export async function placeScript(script: Script, cwd: string): Promise<RunResult> {
+  if (script.terminal === "native") return { target: "Interactive terminal", error: "Select a WezTerm terminal for command placement." }
+  return runWezterm(script, cwd, script.terminal, false)
 }
 
 export function commandArgs(command: string): string[] {
