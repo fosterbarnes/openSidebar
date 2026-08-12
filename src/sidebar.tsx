@@ -5,7 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { BUILTIN_SHELLS, defaultScriptSettings, isDirectory, normalizeExtension, normalizeScriptSettings, parseLauncher, readScripts, readTree, rootSections, updateLanguage, WEZTERM_TERMINALS, type Script, type ScriptLanguage, type ScriptSettings, type WezTermSplitSize } from "./helpers.js"
 import { probeOpenAIUsage, type OpenAIUsage } from "./usage.js"
-import { runScript as runNativeScript } from "./script-runner.js"
+import { placeScript, runScript as runNativeScript } from "./script-runner.js"
 
 const DIRECTORY_COLORS = ["#F7E9B5", "#F4E1A0", "#F1D98B", "#EED076", "#EBC861"]
 const DIRECTORY_INDICATOR_COLORS = ["#DCCF99", "#D5C184", "#CEB56F", "#C7A95A", "#C09D45"]
@@ -281,6 +281,17 @@ const tui: TuiPlugin = async (api, options) => {
       api.ui.toast({ variant: "success", message: `Started ${script.name} in ${result.target}.` })
     } else {
       api.ui.toast({ variant: "error", message: `Could not start ${script.name}: ${result.error}` })
+    }
+  }
+  const placeScriptInTerminal = async (script: Script) => {
+    const current = api.route.current
+    const sessionID = current.name === "session" ? current.params?.sessionID : undefined
+    const cwd = typeof sessionID === "string" ? api.state.session.get(sessionID)?.directory : project
+    const result = await placeScript(script, cwd || project)
+    if (!result.error) {
+      api.ui.toast({ variant: "success", message: `Placed ${script.name} in ${result.target}.` })
+    } else {
+      api.ui.toast({ variant: "error", message: `Could not place ${script.name}: ${result.error}` })
     }
   }
   const weeklyWindow = () => {
@@ -872,7 +883,7 @@ const tui: TuiPlugin = async (api, options) => {
                   onMouseOver={() => setHovered(`script:${script.name}`)}
                   onMouseOut={() => setHovered()}
                   onMouseDown={(event) => {
-                    if (event.button === 2) insertPath(props.session_id, script.filePath || path.join(project, "package.json"), true)
+                    if (event.button === 2) placeScriptInTerminal(script)
                     else if (event.button === 0) runScript(script)
                   }}
                 >
