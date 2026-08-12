@@ -3,7 +3,7 @@ import type { TuiDialogSelectProps, TuiPlugin, TuiPluginModule, TuiPromptRef } f
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { isDirectory, readScripts, readTree, rootSections, type Script } from "./helpers.js"
+import { BUILTIN_SHELLS, defaultScriptSettings, isDirectory, normalizeExtension, normalizeScriptSettings, parseLauncher, readScripts, readTree, rootSections, updateLanguage, WEZTERM_TERMINALS, type Script, type ScriptLanguage, type ScriptSettings, type WezTermSplitSize } from "./helpers.js"
 import { probeOpenAIUsage, type OpenAIUsage } from "./usage.js"
 import { runScript as runNativeScript } from "./script-runner.js"
 
@@ -14,6 +14,13 @@ const ADD_ROOT = "__sidebar_add_custom_root__"
 const RESET_ROOT = "__sidebar_reset_project_root__"
 const RECENT_ROOTS = "__sidebar_recent_custom_roots__"
 const FAVORITE_ROOTS = "__sidebar_favorite_custom_roots__"
+const ADD_SCRIPT_EXECUTABLE = "__sidebar_add_script_executable__"
+const ADD_SCRIPT_EXTENSION = "__sidebar_add_script_extension__"
+const RESET_SCRIPT_SETTINGS = "__sidebar_reset_script_settings__"
+const SCRIPT_SHELL_SECTION = "__sidebar_script_shell_section__"
+const SCRIPT_LANGUAGE_SECTION = "__sidebar_script_language_section__"
+const SCRIPT_EXTENSION_SECTION = "__sidebar_script_extension_section__"
+const WEZTERM_SIZE_SECTION = "__sidebar_wezterm_size_section__"
 const USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000
 const MODEL_STATE_PATH = path.join(process.env.XDG_STATE_HOME ?? path.join(os.homedir(), ".local", "state"), "opencode", "model.json")
 
@@ -44,8 +51,22 @@ function rootsKey(sessionID: string): string {
   return `opencode-sidebar-tools:file-roots:${sessionID}`
 }
 
+function scriptSettingsKey(worktree: string): string {
+  return `opencode-sidebar-tools:script-settings:${worktree}`
+}
+
 type RootState = { customRoots: string[]; activeRoot?: string }
 type SelectedModel = { providerID: string; modelID: string }
+
+function globalScriptSettings(options: unknown): ScriptSettings {
+  if (!options || typeof options !== "object") return defaultScriptSettings()
+  const value = (options as { scripts?: unknown }).scripts
+  return normalizeScriptSettings(value)
+}
+
+function loadScriptSettings(api: Parameters<TuiPlugin>[0], worktree: string, defaults: ScriptSettings): ScriptSettings {
+  return normalizeScriptSettings(api.kv.get<unknown>(scriptSettingsKey(worktree), undefined), defaults)
+}
 
 function loadRootState(api: Parameters<TuiPlugin>[0], sessionID: string): RootState {
   const value = api.kv.get<unknown>(rootsKey(sessionID), {})
@@ -119,7 +140,7 @@ function savedVariant(model: { providerID: string; id: string } | undefined): st
   }
 }
 
-const tui: TuiPlugin = async (api) => {
+const tui: TuiPlugin = async (api, options) => {
   const currentSessionID = () => {
     const current = api.route.current
     const sessionID = current.name === "session" ? current.params?.sessionID : undefined
@@ -134,10 +155,12 @@ const tui: TuiPlugin = async (api) => {
   let project = projectRoot()
   let rootState = loadRootState(api, sessionID)
   let root = rootState.activeRoot || project
+  const scriptDefaults = globalScriptSettings(options)
+  let scriptSettings = loadScriptSettings(api, project, scriptDefaults)
   const hoverColor = midpointColor(api.theme.current.primary, DIRECTORY_COLORS[0])
   const headerButtonColor = palerColor(api.theme.current.accent)
   const promptRefs = new Map<string, TuiPromptRef>()
-  const [scripts, setScripts] = createSignal(readScripts(project, root))
+  const [scripts, setScripts] = createSignal(readScripts(project, root, scriptSettings))
   const [scriptsOpen, setScriptsOpen] = createSignal(true)
   const [filesOpen, setFilesOpen] = createSignal(true)
   const [hovered, setHovered] = createSignal<string>()
@@ -152,6 +175,7 @@ const tui: TuiPlugin = async (api) => {
   let usageRunning = false
   const usageAbort = new AbortController()
   let modelStateWatcher: fs.FSWatcher | undefined
+  let refreshCommands = () => {}
 
   const refreshSelectedModel = (forSessionID = currentSessionID()) => {
     const next = savedModelState(api.state.session.get(forSessionID)?.agent, api.state.config)
@@ -194,19 +218,22 @@ const tui: TuiPlugin = async (api) => {
     root = rootState.activeRoot || project
     pins = loadPins(api, project)
     rootPins = loadRootPins(api, project)
+    scriptSettings = loadScriptSettings(api, project, scriptDefaults)
     setScriptsOpen(true)
     setFilesOpen(true)
     setExpanded(new Set(["."]))
     refreshSelectedModel(sessionID)
     refreshVariant(sessionID)
-    setScripts(readScripts(project, root))
+    setScripts(readScripts(project, root, scriptSettings))
     setTree(readTree(root, expanded()))
+    refreshCommands()
   }
   const refresh = () => {
     const nextSessionID = currentSessionID()
     syncSession(nextSessionID)
-    setScripts(readScripts(project, root))
+    setScripts(readScripts(project, root, scriptSettings))
     setTree(readTree(root, expanded()))
+    refreshCommands()
     void refreshUsage()
   }
   const saveRootState = () => api.kv.set(rootsKey(sessionID), rootState)
@@ -222,14 +249,16 @@ const tui: TuiPlugin = async (api) => {
     }
     saveRootState()
     setExpanded(new Set(["."]))
-    setScripts(readScripts(project, root))
+    setScripts(readScripts(project, root, scriptSettings))
     setTree(readTree(root, expanded()))
+    refreshCommands()
   }
   const savePins = () => api.kv.set(pinKey(project), [...pins].sort())
   const togglePin = (name: string) => {
     if (pins.has(name)) pins.delete(name)
     else pins.add(name)
     savePins()
+    refreshCommands()
     api.ui.toast({ variant: "success", message: `${pins.has(name) ? "Pinned" : "Unpinned"} script: ${name}` })
   }
   const saveRootPins = () => api.kv.set(rootPinKey(project), [...rootPins].sort())
@@ -240,17 +269,18 @@ const tui: TuiPlugin = async (api) => {
     rootState = { ...rootState, customRoots: [...sections.recentRoots, ...sections.favoriteRoots] }
     saveRootState()
     saveRootPins()
+    refreshCommands()
     api.ui.toast({ variant: "success", message: `${rootPins.has(customRoot) ? "Pinned" : "Unpinned"} root: ${customRoot}` })
   }
   const runScript = async (script: Script) => {
     const current = api.route.current
     const sessionID = current.name === "session" ? current.params?.sessionID : undefined
     const cwd = typeof sessionID === "string" ? api.state.session.get(sessionID)?.directory : project
-    const target = await runNativeScript(script, cwd || project)
-    if (target) {
-      api.ui.toast({ variant: "success", message: `Started ${script.name} in ${target}.` })
+    const result = await runNativeScript(script, cwd || project)
+    if (!result.error) {
+      api.ui.toast({ variant: "success", message: `Started ${script.name} in ${result.target}.` })
     } else {
-      api.ui.toast({ variant: "error", message: "Could not find PowerShell 7 (pwsh)." })
+      api.ui.toast({ variant: "error", message: `Could not start ${script.name}: ${result.error}` })
     }
   }
   const weeklyWindow = () => {
@@ -384,77 +414,322 @@ const tui: TuiPlugin = async (api) => {
   }
   const openRootPicker = () => setTimeout(selectRoot, 100)
 
+  const saveScriptSettings = (next: ScriptSettings, message = "Script settings updated") => {
+    scriptSettings = normalizeScriptSettings(next, scriptDefaults)
+    api.kv.set(scriptSettingsKey(project), scriptSettings)
+    setScripts(readScripts(project, root, scriptSettings))
+    refreshCommands()
+    api.ui.toast({ variant: "success", message })
+  }
+  const resetScriptSettings = () => {
+    scriptSettings = normalizeScriptSettings(null, scriptDefaults)
+    api.kv.set(scriptSettingsKey(project), null)
+    setScripts(readScripts(project, root, scriptSettings))
+    refreshCommands()
+    api.ui.toast({ variant: "success", message: "Script settings reset" })
+  }
+  const toggleLanguage = (languageID: string) => {
+    saveScriptSettings(updateLanguage(scriptSettings, languageID, (language) => ({ ...language, enabled: !language.enabled })))
+  }
+  const toggleExtension = (languageID: string, extension: string) => {
+    saveScriptSettings(updateLanguage(scriptSettings, languageID, (language) => ({
+      ...language,
+      extensions: language.extensions.includes(extension)
+        ? language.extensions.filter((item) => item !== extension)
+        : [...language.extensions, extension],
+    })))
+  }
+  const chooseLanguageForExtension = (extension: string) => {
+    const options = scriptSettings.languages.map((language) => ({
+      title: language.title,
+      value: language.id,
+      category: language.enabled ? "Enabled languages" : "Disabled languages",
+      footer: language.launcher.executable,
+      disabled: !language.enabled,
+    }))
+    api.ui.dialog.replace(() => api.ui.DialogSelect({
+      title: `Track ${extension} with`,
+      options,
+      current: options.find((option) => !option.disabled)?.value,
+      onSelect: (option) => {
+        saveScriptSettings(updateLanguage(scriptSettings, option.value, (language) => ({
+          ...language,
+          extensions: language.extensions.includes(extension) ? language.extensions : [...language.extensions, extension],
+        })), `Tracking ${extension} with ${option.title}`)
+        selectScriptSettings()
+      },
+    }))
+  }
+  const promptCustomExtension = (languageID?: string) => api.ui.dialog.replace(() => api.ui.DialogPrompt({
+    title: "Add script extension",
+    description: () => <text>Enter an extension such as .ps1 or .envrc.</text>,
+    placeholder: ".custom",
+    onConfirm: (value) => {
+      const extension = normalizeExtension(value)
+      if (!extension) {
+        api.ui.toast({ variant: "error", message: "Enter a valid file extension." })
+        return
+      }
+      if (languageID) {
+        saveScriptSettings(updateLanguage(scriptSettings, languageID, (language) => ({
+          ...language,
+          extensions: language.extensions.includes(extension) ? language.extensions : [...language.extensions, extension],
+        })), `Tracking ${extension}`)
+        selectScriptSettings()
+      } else {
+        chooseLanguageForExtension(extension)
+      }
+    },
+    onCancel: selectScriptSettings,
+  }))
+  const promptCustomExecutable = () => api.ui.dialog.replace(() => api.ui.DialogPrompt({
+    title: "Add custom script executable",
+    description: () => <text>Enter an executable and optional arguments. The file path is appended.</text>,
+    placeholder: "my-runner --flag",
+    onConfirm: (value) => {
+      const tokens = parseLauncher(value)
+      if (!tokens) {
+        api.ui.toast({ variant: "error", message: "Enter an executable." })
+        return
+      }
+      const [executable, ...args] = tokens
+      const id = `custom-${Date.now()}`
+      const language: ScriptLanguage = {
+        id,
+        title: `Custom: ${executable}`,
+        enabled: true,
+        launcher: { executable, args },
+        extensions: [],
+      }
+      saveScriptSettings({ ...scriptSettings, languages: [...scriptSettings.languages, language] }, `Added ${executable}`)
+      promptCustomExtension(id)
+    },
+    onCancel: selectScriptSettings,
+  }))
+  const splitSizeLabel = (size: WezTermSplitSize) => "Percent" in size ? `${size.Percent}%` : `${size.Cells} cells`
+  const promptWeztermSizeValue = (direction: "horizontal" | "vertical", mode: "Percent" | "Cells") => api.ui.dialog.replace(() => api.ui.DialogPrompt({
+    title: `${direction === "horizontal" ? "Horizontal" : "Vertical"} split ${mode}`,
+    description: () => <text>{mode === "Percent" ? "Enter a percentage from 1 to 99." : "Enter a positive cell count."}</text>,
+    placeholder: mode === "Percent" ? "30" : "20",
+    onConfirm: (value) => {
+      const number = Number(value.trim())
+      const valid = Number.isInteger(number) && (mode === "Percent" ? number > 0 && number < 100 : number > 0)
+      if (!valid) {
+        api.ui.toast({ variant: "error", message: mode === "Percent" ? "Enter a whole percentage from 1 to 99." : "Enter a positive whole number of cells." })
+        return
+      }
+      const size: WezTermSplitSize = mode === "Percent" ? { Percent: number } : { Cells: number }
+      saveScriptSettings({
+        ...scriptSettings,
+        wezterm: { ...scriptSettings.wezterm, [direction]: size },
+      }, `${direction === "horizontal" ? "Horizontal" : "Vertical"} split size set to ${splitSizeLabel(size)}`)
+      selectScriptSettings()
+    },
+    onCancel: selectScriptSettings,
+  }))
+  const selectWeztermSizeMode = (direction: "horizontal" | "vertical") => {
+    const current = scriptSettings.wezterm[direction]
+    api.ui.dialog.replace(() => api.ui.DialogSelect({
+      title: `${direction === "horizontal" ? "Horizontal" : "Vertical"} split size`,
+      options: [
+        { title: "Percent", value: "Percent", footer: "Percent" in current ? `${current.Percent}%` : "" },
+        { title: "Cells", value: "Cells", footer: "Cells" in current ? `${current.Cells} cells` : "" },
+      ],
+      current: "Percent" in current ? "Percent" : "Cells",
+      onSelect: (option) => promptWeztermSizeValue(direction, option.value as "Percent" | "Cells"),
+    }))
+  }
+  const selectWeztermSize = (direction: "horizontal" | "vertical") => selectWeztermSizeMode(direction)
+  const selectScriptSettings = () => {
+    const defaults = defaultScriptSettings()
+    const languageMap = new Map(scriptSettings.languages.map((language) => [language.id, language]))
+    const extensionOptions = defaults.languages.flatMap((language) => {
+      const current = languageMap.get(language.id)
+      const extensions = [...new Set([...language.extensions, ...(current?.extensions ?? [])])]
+      return extensions.map((extension) => ({
+        title: extension,
+        value: `extension:${language.id}:${extension}`,
+        category: language.title,
+        footer: current?.extensions.includes(extension) ? "tracked" : "not tracked",
+      }))
+    }).concat(scriptSettings.languages
+      .filter((language) => !defaults.languages.some((item) => item.id === language.id))
+      .flatMap((language) => language.extensions.map((extension) => ({
+        title: extension,
+        value: `extension:${language.id}:${extension}`,
+        category: language.title,
+        footer: "tracked",
+      }))))
+    const splitDirection = scriptSettings.terminal === "wezterm-horizontal"
+      ? "horizontal"
+      : scriptSettings.terminal === "wezterm-vertical"
+        ? "vertical"
+        : undefined
+    const splitSizeOptions = splitDirection
+      ? [
+          { title: "Split size", value: WEZTERM_SIZE_SECTION, disabled: true },
+          { title: `${splitDirection === "horizontal" ? "Horizontal" : "Vertical"} split size`, value: `wezterm-size:${splitDirection}`, category: "Split size", footer: splitSizeLabel(scriptSettings.wezterm[splitDirection]) },
+        ]
+      : []
+    const options = [
+      { title: "Shell", value: SCRIPT_SHELL_SECTION, disabled: true },
+      ...BUILTIN_SHELLS.map((shell) => ({
+        title: shell.title,
+        value: `shell:${shell.id}`,
+        category: "Shell",
+        footer: scriptSettings.shell.executable === shell.launcher.executable ? "selected" : shell.launcher.executable,
+      })),
+      ...(BUILTIN_SHELLS.some((shell) => shell.launcher.executable === scriptSettings.shell.executable)
+        ? []
+        : [{ title: `Custom: ${scriptSettings.shell.executable}`, value: "shell:custom", category: "Shell", footer: "selected" }]),
+      { title: "WezTerm", value: "wezterm-section", disabled: true },
+      ...WEZTERM_TERMINALS.map((terminal) => ({
+        title: terminal.title,
+        value: `terminal:${terminal.id}`,
+        category: "WezTerm",
+        footer: scriptSettings.terminal === terminal.id ? "selected" : "",
+      })),
+      { title: "Native detached runner", value: "terminal:native", category: "WezTerm", footer: scriptSettings.terminal === "native" ? "selected" : "" },
+      ...splitSizeOptions,
+      { title: "Languages", value: SCRIPT_LANGUAGE_SECTION, disabled: true },
+      ...scriptSettings.languages.map((language) => ({
+        title: `${language.enabled ? "*" : " "} ${language.title}`,
+        value: `language:${language.id}`,
+        category: "Languages",
+        footer: language.extensions.join(", ") || "no extensions",
+      })),
+      { title: "Tracked extensions", value: SCRIPT_EXTENSION_SECTION, disabled: true },
+      ...extensionOptions,
+      { title: "Add custom executable...", value: ADD_SCRIPT_EXECUTABLE },
+      { title: "Add custom extension...", value: ADD_SCRIPT_EXTENSION },
+      { title: "Reset project script settings", value: RESET_SCRIPT_SETTINGS },
+    ]
+    const selectedTerminal = scriptSettings.terminal === "native" ? "terminal:native" : `terminal:${scriptSettings.terminal}`
+    const dialogProps = {
+      title: `Project scripts: ${project}`,
+      skipFilter: true,
+      options,
+      current: selectedTerminal,
+      onSelect: (option: (typeof options)[number]) => {
+        if (option.value === ADD_SCRIPT_EXECUTABLE) promptCustomExecutable()
+        else if (option.value === ADD_SCRIPT_EXTENSION) promptCustomExtension()
+        else if (option.value === RESET_SCRIPT_SETTINGS) {
+          resetScriptSettings()
+          selectScriptSettings()
+        }
+        else if (option.value.startsWith("terminal:")) {
+          const terminal = option.value.slice("terminal:".length) as ScriptSettings["terminal"]
+          saveScriptSettings({ ...scriptSettings, terminal }, terminal === "native" ? "Using native detached runner" : `Using WezTerm: ${option.title}`)
+          selectScriptSettings()
+        } else if (option.value.startsWith("wezterm-size:")) {
+          selectWeztermSize(option.value.slice("wezterm-size:".length) as "horizontal" | "vertical")
+        } else if (option.value.startsWith("shell:")) {
+          const shell = BUILTIN_SHELLS.find((item) => `shell:${item.id}` === option.value)
+          if (shell) {
+            saveScriptSettings({ ...scriptSettings, shell: { ...shell.launcher, args: [...shell.launcher.args] } }, `Using ${shell.title}`)
+            selectScriptSettings()
+          }
+        } else if (option.value.startsWith("language:")) {
+          toggleLanguage(option.value.slice("language:".length))
+          selectScriptSettings()
+        } else if (option.value.startsWith("extension:")) {
+          const [, languageID, extension] = option.value.split(":")
+          toggleExtension(languageID, extension)
+          selectScriptSettings()
+        }
+      },
+    } as unknown as TuiDialogSelectProps<string>
+    api.ui.dialog.replace(() => api.ui.DialogSelect(dialogProps))
+  }
+  const openScriptSettings = () => setTimeout(selectScriptSettings, 100)
+
   const disposers: Array<() => void> = []
-  const rootCommands = rootSections(rootState.customRoots, [...rootPins])
-  const commands = [
-    {
-      name: "sidebar.refresh",
-      title: "Refresh project sidebar",
-      category: "Sidebar",
-      namespace: "sidebar",
-      run: refresh,
-    },
-    {
-      name: "sidebar.file-root.set",
-      title: "Set file root",
-      category: "Project files",
-      namespace: "sidebar",
-      run: promptForRoot,
-    },
-    {
-      name: "sidebar.file-root.switch",
-      title: "Switch file root",
-      category: "Project files",
-      namespace: "sidebar",
-      run: selectRoot,
-    },
-    {
-      name: "sidebar.file-root.reset",
-      title: "Reset file root to project",
-      category: "Project files",
-      namespace: "sidebar",
-      run: () => setRoot(project),
-    },
-    ...rootCommands.favoriteRoots.map((customRoot) => ({
-      name: commandId("file-root-pin", customRoot),
-      title: `Unpin file root: ${customRoot}`,
-      category: "Project files",
-      namespace: "sidebar",
-      run: () => toggleRootPin(customRoot),
-    })),
-    ...rootCommands.recentRoots.map((customRoot) => ({
-      name: commandId("file-root-pin", customRoot),
-      title: `Pin file root: ${customRoot}`,
-      category: "Project files",
-      namespace: "sidebar",
-      run: () => toggleRootPin(customRoot),
-    })),
-    ...scripts().flatMap((script) => [
+  const registerCommands = () => {
+    const rootCommands = rootSections(rootState.customRoots, [...rootPins])
+    const commands = [
       {
-        name: commandId("run", script.name),
-        title: `Run script: ${script.name}`,
-        category: "Project scripts",
+        name: "sidebar.refresh",
+        title: "Refresh project sidebar",
+        category: "Sidebar",
         namespace: "sidebar",
-        run: () => runScript(script),
+        run: refresh,
       },
       {
-        name: commandId("pin", script.name),
-        title: `${pins.has(script.name) ? "Unpin" : "Pin"} script: ${script.name}`,
+        name: "sidebar.script-settings",
+        title: "Configure project scripts",
         category: "Project scripts",
         namespace: "sidebar",
-        run: () => togglePin(script.name),
+        run: selectScriptSettings,
       },
-    ]),
-    ...tree().filter((entry) => entry.directory).map((entry) => ({
-      name: commandId("toggle", entry.relativePath),
-      title: `${expanded().has(entry.relativePath) ? "Collapse" : "Expand"}: ${entry.relativePath}`,
-      category: "Project files",
-      namespace: "sidebar",
-      run: () => toggleDirectory(entry.relativePath),
-    })),
-  ]
-  const registered = api.keymap.registerLayer({ commands })
-  if (typeof registered === "function") disposers.push(registered)
+      {
+        name: "sidebar.file-root.set",
+        title: "Set file root",
+        category: "Project files",
+        namespace: "sidebar",
+        run: promptForRoot,
+      },
+      {
+        name: "sidebar.file-root.switch",
+        title: "Switch file root",
+        category: "Project files",
+        namespace: "sidebar",
+        run: selectRoot,
+      },
+      {
+        name: "sidebar.file-root.reset",
+        title: "Reset file root to project",
+        category: "Project files",
+        namespace: "sidebar",
+        run: () => setRoot(project),
+      },
+      ...rootCommands.favoriteRoots.map((customRoot) => ({
+        name: commandId("file-root-pin", customRoot),
+        title: `Unpin file root: ${customRoot}`,
+        category: "Project files",
+        namespace: "sidebar",
+        run: () => toggleRootPin(customRoot),
+      })),
+      ...rootCommands.recentRoots.map((customRoot) => ({
+        name: commandId("file-root-pin", customRoot),
+        title: `Pin file root: ${customRoot}`,
+        category: "Project files",
+        namespace: "sidebar",
+        run: () => toggleRootPin(customRoot),
+      })),
+      ...scripts().flatMap((script) => [
+        {
+          name: commandId("run", script.name),
+          title: `Run script: ${script.name}`,
+          category: "Project scripts",
+          namespace: "sidebar",
+          run: () => runScript(script),
+        },
+        {
+          name: commandId("pin", script.name),
+          title: `${pins.has(script.name) ? "Unpin" : "Pin"} script: ${script.name}`,
+          category: "Project scripts",
+          namespace: "sidebar",
+          run: () => togglePin(script.name),
+        },
+      ]),
+      ...tree().filter((entry) => entry.directory).map((entry) => ({
+        name: commandId("toggle", entry.relativePath),
+        title: `${expanded().has(entry.relativePath) ? "Collapse" : "Expand"}: ${entry.relativePath}`,
+        category: "Project files",
+        namespace: "sidebar",
+        run: () => toggleDirectory(entry.relativePath),
+      })),
+    ]
+    return api.keymap.registerLayer({ commands })
+  }
+  let commandDisposer = registerCommands()
+  refreshCommands = () => {
+    if (typeof commandDisposer === "function") commandDisposer()
+    commandDisposer = registerCommands()
+  }
+  disposers.push(() => {
+    if (typeof commandDisposer === "function") commandDisposer()
+  })
   disposers.push(api.event.on("file.watcher.updated", refresh))
   disposers.push(api.event.on("tui.session.select", () => queueMicrotask(refresh)))
   try {
@@ -568,14 +843,24 @@ const tui: TuiPlugin = async (api) => {
               paddingRight={1}
               onMouseOver={() => setHovered("scripts")}
               onMouseOut={() => setHovered()}
+              onMouseDown={(event) => {
+                if (event.button === 0) openScriptSettings()
+              }}
             >
               <text
                 fg={hovered() === "scripts" ? hoverColor : api.theme.current.text}
-                onMouseDown={() => setScriptsOpen((open) => !open)}
+                onMouseDown={(event) => {
+                  event.stopPropagation()
+                  if (event.button === 0) setScriptsOpen((open) => !open)
+                }}
+                onMouseUp={(event) => event.stopPropagation()}
               >{scriptsOpen() ? "-" : "+"}</text>
               <text
                 fg={hovered() === "scripts" ? hoverColor : api.theme.current.accent}
-                onMouseDown={() => setScriptsOpen((open) => !open)}
+                onMouseDown={(event) => {
+                  event.stopPropagation()
+                  if (event.button === 0) openScriptSettings()
+                }}
               ><b>scripts</b></text>
             </box>
             <Show when={scriptsOpen()}>

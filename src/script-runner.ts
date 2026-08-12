@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process"
-import type { Script } from "./helpers.js"
+import type { Script, ScriptLauncher, ScriptTerminal, WezTermSplitSize } from "./helpers.js"
 
-export type RunTarget = "pwsh"
+export type RunResult = { target: string; error?: string }
 
 function available(command: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -14,7 +14,7 @@ function available(command: string): Promise<boolean> {
   })
 }
 
-function spawnCommand(command: string, args: string[], cwd: string): Promise<boolean> {
+function spawnCommand(command: string, args: string[], cwd: string): Promise<RunResult> {
   return new Promise((resolve) => {
     let settled = false
     const child = spawn(command, args, {
@@ -23,16 +23,24 @@ function spawnCommand(command: string, args: string[], cwd: string): Promise<boo
       stdio: "ignore",
       windowsHide: false,
     })
-    const finish = (started: boolean) => {
+    const finish = (error?: Error) => {
       if (settled) return
       settled = true
-      resolve(started)
+      resolve({ target: command, ...(error ? { error: error.message } : {}) })
     }
-    child.once("error", () => finish(false))
+    child.once("error", (error) => finish(error))
     child.once("spawn", () => {
       child.unref()
-      finish(true)
+      finish()
     })
+  })
+}
+
+function runCommand(command: string, args: string[], cwd: string): Promise<RunResult> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { cwd, stdio: "ignore", windowsHide: true })
+    child.once("error", (error) => resolve({ target: command, error: error.message }))
+    child.once("close", (code) => resolve(code === 0 ? { target: command } : { target: command, error: `Exited with code ${code ?? "unknown"}.` }))
   })
 }
 
@@ -41,13 +49,65 @@ function shellArgs(command: string): string[] {
   return ["-NoLogo", "-NoExit", "-EncodedCommand", encoded]
 }
 
-export async function runScript(script: Script, cwd: string): Promise<RunTarget | undefined> {
-  if (!await available("pwsh")) return undefined
-  const command = process.platform === "win32" ? "cmd.exe" : "pwsh"
-  const args = process.platform === "win32"
-    ? ["/d", "/c", "start", "", "pwsh", ...shellArgs(script.command)]
-    : shellArgs(script.command)
-  return await spawnCommand(command, args, cwd) ? "pwsh" : undefined
+function launchArgs(launcher: ScriptLauncher, target: string): string[] {
+  return [...launcher.args, target]
+}
+
+function quoteCommandArg(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`
+}
+
+export function scriptCommand(script: Script): string {
+  if (!script.filePath) return script.command
+  return [script.launcher.executable, ...launchArgs(script.launcher, script.filePath).map(quoteCommandArg)].join(" ")
+}
+
+export function weztermArgs(terminal: Exclude<ScriptTerminal, "native">, cwd: string, size?: WezTermSplitSize): string[] {
+  if (terminal === "wezterm-window") return ["cli", "spawn", "--new-window", "--cwd", cwd]
+  if (terminal === "wezterm-horizontal") return ["cli", "split-pane", "--horizontal", ...sizeArgs(size), "--cwd", cwd]
+  if (terminal === "wezterm-vertical") return ["cli", "split-pane", "--bottom", ...sizeArgs(size), "--cwd", cwd]
+  return ["cli", "spawn", "--cwd", cwd]
+}
+
+function sizeArgs(size: WezTermSplitSize | undefined): string[] {
+  if (!size) return []
+  return "Percent" in size ? ["--percent", String(size.Percent)] : ["--cells", String(size.Cells)]
+}
+
+function weztermCommand(): string {
+  return process.platform === "win32" ? "wezterm.exe" : "wezterm"
+}
+
+function spawnWezterm(commandArgs: string[], cwd: string): Promise<{ paneID?: string; error?: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(weztermCommand(), commandArgs, { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true })
+    let output = ""
+    child.stdout.on("data", (chunk) => { output += chunk.toString() })
+    child.once("error", (error) => resolve({ error: error.message }))
+    child.once("close", (code) => resolve(code === 0 && output.trim() ? { paneID: output.trim() } : { error: `WezTerm exited with code ${code ?? "unknown"}.` }))
+  })
+}
+
+async function runWezterm(script: Script, cwd: string, terminal: Exclude<ScriptTerminal, "native">): Promise<RunResult> {
+  if (!await available(weztermCommand())) return { target: "WezTerm", error: "Executable not found: wezterm" }
+  const pane = await spawnWezterm(weztermArgs(terminal, cwd, script.weztermSize), cwd)
+  if (!pane.paneID) return { target: "WezTerm", error: pane.error || "Could not create a WezTerm pane." }
+  const sent = await runCommand(weztermCommand(), ["cli", "send-text", "--pane-id", pane.paneID, "--no-paste", `${scriptCommand(script)}\r`], cwd)
+  return sent.error ? { target: "WezTerm", error: sent.error } : { target: "WezTerm" }
+}
+
+export async function runScript(script: Script, cwd: string): Promise<RunResult> {
+  if (script.terminal !== "native") return runWezterm(script, cwd, script.terminal)
+  const target = script.filePath || script.command
+  if (!await available(script.launcher.executable)) {
+    return { target: script.launcher.executable, error: `Executable not found: ${script.launcher.executable}` }
+  }
+  const args = launchArgs(script.launcher, target)
+  const command = process.platform === "win32" ? "cmd.exe" : script.launcher.executable
+  const commandArgs = process.platform === "win32"
+    ? ["/d", "/c", "start", "", script.launcher.executable, ...args]
+    : args
+  return spawnCommand(command, commandArgs, cwd)
 }
 
 export function commandArgs(command: string): string[] {

@@ -6,7 +6,207 @@ const MAX_TREE_ITEMS = 80
 export const MAX_RECENT_ROOTS = 8
 const PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"])
 
-export type Script = { name: string; command: string; filePath?: string }
+export type ScriptLauncher = {
+  executable: string
+  args: string[]
+}
+
+export type ScriptTerminal = "native" | "wezterm-tab" | "wezterm-window" | "wezterm-horizontal" | "wezterm-vertical"
+export type WezTermSplitSize = { Percent: number } | { Cells: number }
+
+export type WezTermSettings = {
+  horizontal: WezTermSplitSize
+  vertical: WezTermSplitSize
+}
+
+export type ScriptLanguage = {
+  id: string
+  title: string
+  enabled: boolean
+  launcher: ScriptLauncher
+  extensions: string[]
+}
+
+export type ScriptSettings = {
+  shell: ScriptLauncher
+  terminal: ScriptTerminal
+  wezterm: WezTermSettings
+  languages: ScriptLanguage[]
+}
+
+const DEFAULT_SCRIPT_SETTINGS: ScriptSettings = {
+  shell: { executable: "pwsh", args: ["-NoLogo", "-NoExit", "-Command"] },
+  terminal: "native",
+  wezterm: {
+    horizontal: { Percent: 50 },
+    vertical: { Percent: 50 },
+  },
+  languages: [
+    { id: "powershell", title: "PowerShell 7", enabled: true, launcher: { executable: "pwsh", args: ["-NoLogo", "-NoExit", "-File"] }, extensions: [".ps1", ".psm1"] },
+    { id: "sh", title: "POSIX sh", enabled: true, launcher: { executable: "sh", args: [] }, extensions: [".sh"] },
+    { id: "bash", title: "Bash", enabled: true, launcher: { executable: "bash", args: [] }, extensions: [".bash"] },
+    { id: "zsh", title: "Zsh", enabled: true, launcher: { executable: "zsh", args: [] }, extensions: [".zsh"] },
+    { id: "python", title: "Python", enabled: true, launcher: { executable: "python", args: [] }, extensions: [".py"] },
+    { id: "node", title: "Node.js", enabled: true, launcher: { executable: "node", args: [] }, extensions: [".js", ".mjs", ".cjs"] },
+    { id: "typescript", title: "TypeScript", enabled: true, launcher: { executable: "npx", args: ["tsx"] }, extensions: [".ts", ".mts", ".cts"] },
+    { id: "cmd", title: "Windows cmd", enabled: true, launcher: { executable: "cmd.exe", args: ["/d", "/c"] }, extensions: [".bat", ".cmd"] },
+    { id: "ruby", title: "Ruby", enabled: true, launcher: { executable: "ruby", args: [] }, extensions: [".rb"] },
+    { id: "php", title: "PHP", enabled: true, launcher: { executable: "php", args: [] }, extensions: [".php"] },
+  ],
+}
+
+export const BUILTIN_SHELLS = [
+  { id: "powershell", title: "PowerShell 7", launcher: { executable: "pwsh", args: ["-NoLogo", "-NoExit", "-Command"] } },
+  { id: "sh", title: "POSIX sh", launcher: { executable: "sh", args: ["-c"] } },
+  { id: "bash", title: "Bash", launcher: { executable: "bash", args: ["-c"] } },
+  { id: "zsh", title: "Zsh", launcher: { executable: "zsh", args: ["-c"] } },
+  { id: "cmd", title: "Windows cmd", launcher: { executable: "cmd.exe", args: ["/d", "/k"] } },
+] as const
+
+export const WEZTERM_TERMINALS = [
+  { id: "wezterm-tab", title: "New tab" },
+  { id: "wezterm-window", title: "New window" },
+  { id: "wezterm-horizontal", title: "Horizontal split (side-by-side)" },
+  { id: "wezterm-vertical", title: "Vertical split (stacked)" },
+] as const
+
+function cloneSettings(settings: ScriptSettings): ScriptSettings {
+  return {
+    shell: { executable: settings.shell.executable, args: [...settings.shell.args] },
+    terminal: settings.terminal,
+    wezterm: {
+      horizontal: { ...settings.wezterm.horizontal },
+      vertical: { ...settings.wezterm.vertical },
+    },
+    languages: settings.languages.map((language) => ({
+      id: language.id,
+      title: language.title,
+      enabled: language.enabled,
+      launcher: { executable: language.launcher.executable, args: [...language.launcher.args] },
+      extensions: [...language.extensions],
+    })),
+  }
+}
+
+function launcher(value: unknown, fallback: ScriptLauncher): ScriptLauncher {
+  if (!value || typeof value !== "object") return { executable: fallback.executable, args: [...fallback.args] }
+  const input = value as { executable?: unknown; args?: unknown }
+  if (typeof input.executable !== "string" || !input.executable.trim()) {
+    return { executable: fallback.executable, args: [...fallback.args] }
+  }
+  return {
+    executable: input.executable.trim(),
+    args: Array.isArray(input.args) ? input.args.filter((arg): arg is string => typeof arg === "string") : [...fallback.args],
+  }
+}
+
+export function normalizeExtension(value: string): string | undefined {
+  const extension = value.trim().toLowerCase()
+  if (!extension) return undefined
+  const normalized = extension.startsWith(".") ? extension : `.${extension}`
+  return /^\.[a-z0-9][a-z0-9._-]*$/.test(normalized) ? normalized : undefined
+}
+
+function language(value: unknown, fallback: ScriptLanguage | undefined): ScriptLanguage | undefined {
+  if (!value || typeof value !== "object") return fallback
+  const input = value as { id?: unknown; title?: unknown; enabled?: unknown; launcher?: unknown; extensions?: unknown }
+  if (typeof input.id !== "string" || !input.id.trim() || typeof input.title !== "string" || !input.title.trim()) return fallback
+  const fallbackLauncher = fallback?.launcher ?? { executable: "pwsh", args: [] }
+  const extensions = Array.isArray(input.extensions)
+    ? [...new Set(input.extensions.filter((item): item is string => typeof item === "string").map(normalizeExtension).filter((item): item is string => Boolean(item)))]
+    : fallback?.extensions ?? []
+  return {
+    id: input.id.trim(),
+    title: input.title.trim(),
+    enabled: typeof input.enabled === "boolean" ? input.enabled : fallback?.enabled ?? true,
+    launcher: launcher(input.launcher, fallbackLauncher),
+    extensions,
+  }
+}
+
+function splitSize(value: unknown, fallback: WezTermSplitSize): WezTermSplitSize {
+  if (!value || typeof value !== "object") return { ...fallback }
+  const input = value as { Percent?: unknown; Cells?: unknown }
+  if (typeof input.Percent === "number" && Number.isInteger(input.Percent) && input.Percent > 0 && input.Percent < 100) {
+    return { Percent: input.Percent }
+  }
+  if (typeof input.Cells === "number" && Number.isInteger(input.Cells) && input.Cells > 0) {
+    return { Cells: input.Cells }
+  }
+  return { ...fallback }
+}
+
+export function defaultScriptSettings(): ScriptSettings {
+  return cloneSettings(DEFAULT_SCRIPT_SETTINGS)
+}
+
+export function normalizeScriptSettings(value: unknown, base = defaultScriptSettings()): ScriptSettings {
+  if (!value || typeof value !== "object") return cloneSettings(base)
+  const input = value as { shell?: unknown; terminal?: unknown; wezterm?: unknown; languages?: unknown }
+  const wezterm = input.wezterm && typeof input.wezterm === "object"
+    ? input.wezterm as { horizontal?: unknown; vertical?: unknown }
+    : {}
+  const languages = cloneSettings(base).languages
+  if (Array.isArray(input.languages)) {
+    for (const item of input.languages) {
+      const normalized = language(item, languages.find((entry) => entry.id === (item as { id?: unknown })?.id))
+      if (!normalized) continue
+      const index = languages.findIndex((entry) => entry.id === normalized.id)
+      if (index === -1) languages.push(normalized)
+      else languages[index] = normalized
+    }
+  }
+  return {
+    shell: launcher(input.shell, base.shell),
+    terminal: input.terminal === "native"
+      ? "native"
+      : WEZTERM_TERMINALS.some((item) => item.id === input.terminal)
+        ? input.terminal as ScriptTerminal
+        : base.terminal,
+    wezterm: {
+      horizontal: splitSize(wezterm.horizontal, base.wezterm.horizontal),
+      vertical: splitSize(wezterm.vertical, base.wezterm.vertical),
+    },
+    languages,
+  }
+}
+
+export function parseLauncher(value: string): string[] | undefined {
+  const tokens: string[] = []
+  let token = ""
+  let quote = ""
+  for (const character of value.trim()) {
+    if (quote) {
+      if (character === quote) quote = ""
+      else token += character
+    } else if (character === '"' || character === "'") {
+      quote = character
+    } else if (/\s/.test(character)) {
+      if (token) {
+        tokens.push(token)
+        token = ""
+      }
+    } else {
+      token += character
+    }
+  }
+  if (quote) return undefined
+  if (token) tokens.push(token)
+  return tokens.length > 0 ? tokens : undefined
+}
+
+export function updateLanguage(
+  settings: ScriptSettings,
+  languageID: string,
+  update: (language: ScriptLanguage) => ScriptLanguage | undefined,
+): ScriptSettings {
+  return {
+    ...cloneSettings(settings),
+    languages: settings.languages.map((item) => item.id === languageID ? update(item) : item).filter((item): item is ScriptLanguage => Boolean(item)),
+  }
+}
+
+export type Script = { name: string; command: string; filePath?: string; launcher: ScriptLauncher; terminal: ScriptTerminal; weztermSize: WezTermSplitSize }
 export type TreeEntry = { name: string; relativePath: string; fullPath: string; directory: boolean; depth: number }
 export type RootSections = { recentRoots: string[]; favoriteRoots: string[] }
 
@@ -58,21 +258,15 @@ function shellPath(filePath: string): string {
   return `"${filePath.replaceAll('"', '\\"')}"`
 }
 
-function fileScript(filePath: string): Script | undefined {
-  const extension = path.extname(filePath).toLowerCase()
-  const command = {
-    ".ps1": `& ${shellPath(filePath)}`,
-    ".sh": `sh ${shellPath(filePath)}`,
-    ".bat": shellPath(filePath),
-    ".cmd": shellPath(filePath),
-    ".py": `python ${shellPath(filePath)}`,
-    ".js": `node ${shellPath(filePath)}`,
-    ".ts": `npx tsx ${shellPath(filePath)}`,
-  }[extension]
-  return command ? { name: path.relative(path.dirname(path.dirname(filePath)), filePath), command, filePath } : undefined
+function fileScript(filePath: string, languages: readonly ScriptLanguage[]): Script | undefined {
+  const fileName = path.basename(filePath).toLowerCase()
+  const language = languages.find((item) => item.enabled && item.extensions.some((extension) => fileName.endsWith(extension)))
+  return language
+    ? { name: path.relative(path.dirname(path.dirname(filePath)), filePath), command: shellPath(filePath), filePath, launcher: language.launcher, terminal: "native", weztermSize: { Percent: 50 } }
+    : undefined
 }
 
-function readPackageScripts(directory: string): Script[] {
+function readPackageScripts(directory: string, shell: ScriptLauncher): Script[] {
   try {
     const packageJson = JSON.parse(fs.readFileSync(path.join(directory, "package.json"), "utf8"))
     if (!packageJson.scripts || typeof packageJson.scripts !== "object") return []
@@ -80,18 +274,18 @@ function readPackageScripts(directory: string): Script[] {
     return Object.keys(packageJson.scripts)
       .filter((name) => /^[a-zA-Z0-9_:.\/-]+$/.test(name))
       .sort((a, b) => a.localeCompare(b))
-      .map((name) => ({ name, command: `${manager} run ${name}` }))
+      .map((name) => ({ name, command: `${manager} run ${name}`, launcher: shell, terminal: "native", weztermSize: { Percent: 50 } }))
   } catch {
     return []
   }
 }
 
-function readFileScripts(root: string): Script[] {
+function readFileScripts(root: string, languages: readonly ScriptLanguage[]): Script[] {
   const scriptsDirectory = path.basename(root) === ".scripts" ? root : path.join(root, ".scripts")
   try {
     return fs.readdirSync(scriptsDirectory, { withFileTypes: true })
       .filter((entry) => entry.isFile())
-      .map((entry) => fileScript(path.join(scriptsDirectory, entry.name)))
+      .map((entry) => fileScript(path.join(scriptsDirectory, entry.name), languages))
       .filter((script): script is Script => Boolean(script))
       .sort((a, b) => a.name.localeCompare(b.name))
   } catch {
@@ -99,8 +293,8 @@ function readFileScripts(root: string): Script[] {
   }
 }
 
-export function readScripts(projectRoot: string, fileRoot = projectRoot): Script[] {
-  return [...readPackageScripts(projectRoot), ...readFileScripts(fileRoot)]
+export function readScripts(projectRoot: string, fileRoot = projectRoot, settings: ScriptSettings = defaultScriptSettings()): Script[] {
+  return [...readPackageScripts(projectRoot, settings.shell), ...readFileScripts(fileRoot, settings.languages)].map((script) => ({ ...script, terminal: settings.terminal, weztermSize: settings.terminal === "wezterm-horizontal" ? settings.wezterm.horizontal : settings.terminal === "wezterm-vertical" ? settings.wezterm.vertical : settings.wezterm.horizontal }))
 }
 
 export function readTree(root: string, expanded: ReadonlySet<string>): TreeEntry[] {

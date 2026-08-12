@@ -3,9 +3,9 @@ import test from "node:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { MAX_RECENT_ROOTS, readScripts, readTree, rootSections } from "../src/helpers.ts"
+import { defaultScriptSettings, MAX_RECENT_ROOTS, normalizeExtension, normalizeScriptSettings, parseLauncher, readScripts, readTree, rootSections } from "../src/helpers.ts"
 import { probeOpenAIUsage, resolveAuthPath } from "../src/usage.ts"
-import { commandArgs } from "../src/script-runner.ts"
+import { commandArgs, scriptCommand, weztermArgs } from "../src/script-runner.ts"
 
 test("reads sorted package scripts", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-tools-"))
@@ -15,6 +15,9 @@ test("reads sorted package scripts", () => {
       JSON.stringify({ scripts: { test: "test", build: "build", "bad && delete": "danger" } })
     )
     assert.deepEqual(readScripts(root).map((script) => script.name), ["build", "test"])
+    const settings = defaultScriptSettings()
+    settings.shell = { executable: "bash", args: ["-c"] }
+    assert.deepEqual(readScripts(root, root, settings)[0].launcher, settings.shell)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -169,6 +172,95 @@ test("expands directories beyond the old shallow depth limit", () => {
     ])
     const tree = readTree(root, expanded)
     assert.equal(tree.some((entry) => entry.name === "deep.ts"), true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("normalizes script settings and extensions", () => {
+  const settings = normalizeScriptSettings({
+    shell: { executable: " bash ", args: ["-c"] },
+    languages: [{
+      id: "custom",
+      title: "Custom",
+      enabled: false,
+      launcher: { executable: "runner", args: ["--watch"] },
+      extensions: ["foo", ".FOO", "bad extension"],
+    }],
+  })
+  assert.deepEqual(settings.shell, { executable: "bash", args: ["-c"] })
+  const custom = settings.languages.find((language) => language.id === "custom")
+  assert.deepEqual(custom?.extensions, [".foo"])
+  assert.equal(custom?.enabled, false)
+  assert.equal(settings.languages.some((language) => language.id === "powershell"), true)
+  assert.equal(normalizeExtension(".d.ts"), ".d.ts")
+  assert.equal(normalizeExtension("bad extension"), undefined)
+})
+
+test("parses custom executable arguments without a shell", () => {
+  assert.deepEqual(parseLauncher('runner "--label=hello world"'), ["runner", "--label=hello world"])
+  assert.equal(parseLauncher('runner "unterminated'), undefined)
+})
+
+test("normalizes native and WezTerm terminal settings", () => {
+  assert.equal(normalizeScriptSettings({ terminal: "wezterm-window" }).terminal, "wezterm-window")
+  assert.equal(normalizeScriptSettings({ terminal: "unsupported" }).terminal, "native")
+  assert.equal(defaultScriptSettings().terminal, "native")
+})
+
+test("normalizes WezTerm split sizes and inherits missing defaults", () => {
+  const settings = normalizeScriptSettings({
+    wezterm: {
+      horizontal: { Percent: 30 },
+      vertical: { Cells: 20 },
+    },
+  })
+  assert.deepEqual(settings.wezterm, { horizontal: { Percent: 30 }, vertical: { Cells: 20 } })
+  assert.deepEqual(normalizeScriptSettings({ wezterm: { horizontal: { Percent: 100 }, vertical: { Cells: 0 } } }).wezterm, {
+    horizontal: { Percent: 50 },
+    vertical: { Percent: 50 },
+  })
+  assert.deepEqual(normalizeScriptSettings({ wezterm: { horizontal: { Cells: 12 } } }).wezterm, {
+    horizontal: { Cells: 12 },
+    vertical: { Percent: 50 },
+  })
+})
+
+test("builds shell commands for package and language scripts", () => {
+  assert.equal(scriptCommand({ name: "build", command: "npm run build", terminal: "native", launcher: { executable: "pwsh", args: [] }, weztermSize: { Percent: 50 } }), "npm run build")
+  assert.equal(scriptCommand({ name: "run.ps1", command: "", filePath: "C:\\work\\safe folder\\run.ps1", terminal: "native", launcher: { executable: "pwsh", args: ["-File"] }, weztermSize: { Percent: 50 } }), "pwsh '-File' 'C:\\work\\safe folder\\run.ps1'")
+})
+
+test("maps WezTerm terminal choices to CLI placement arguments", () => {
+  assert.deepEqual(weztermArgs("wezterm-tab", "C:\\work"), ["cli", "spawn", "--cwd", "C:\\work"])
+  assert.deepEqual(weztermArgs("wezterm-window", "C:\\work"), ["cli", "spawn", "--new-window", "--cwd", "C:\\work"])
+  assert.deepEqual(weztermArgs("wezterm-horizontal", "C:\\work", { Percent: 30 }), ["cli", "split-pane", "--horizontal", "--percent", "30", "--cwd", "C:\\work"])
+  assert.deepEqual(weztermArgs("wezterm-vertical", "C:\\work", { Cells: 20 }), ["cli", "split-pane", "--bottom", "--cells", "20", "--cwd", "C:\\work"])
+})
+
+test("discovers only enabled configured script extensions", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-tools-"))
+  try {
+    mkdirSync(path.join(root, ".scripts"))
+    writeFileSync(path.join(root, ".scripts", "run.foo"), "")
+    writeFileSync(path.join(root, ".scripts", "skip.bar"), "")
+    const settings = defaultScriptSettings()
+    settings.languages = [{
+      id: "custom",
+      title: "Custom",
+      enabled: true,
+      launcher: { executable: "runner", args: ["--file"] },
+      extensions: [".foo"],
+    }, {
+      id: "disabled",
+      title: "Disabled",
+      enabled: false,
+      launcher: { executable: "runner", args: [] },
+      extensions: [".bar"],
+    }]
+    const scripts = readScripts(root, root, settings)
+    assert.deepEqual(scripts.map((script) => script.name), [path.join(".scripts", "run.foo")])
+    assert.deepEqual(scripts[0].launcher, { executable: "runner", args: ["--file"] })
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

@@ -25,7 +25,10 @@ see your weekly usage and when it resets. not all platforms are currently suppor
 
 **`Scripts`**
 
-Run/reference project scripts with `pwsh`. Left-click to run, right-click to paste.
+Run/reference project scripts with the configured shell or language runner. Left-click to run, right-click to paste. Click `scripts` to configure runners, tracked extensions, and other settings.
+
+Built with wezterm, pwsh and Windows in mind first, so un-tested issues may come up on other platforms
+
 
 **`Files`**
 
