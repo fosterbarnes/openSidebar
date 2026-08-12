@@ -23,6 +23,9 @@ toggle through weight options
 
 see your weekly usage and when it resets. not all platforms are currently supported
 
+
+### Main sidebar menu
+
 **`Scripts`**
 
 Run/reference project scripts with the configured shell or language runner. Left-click to run, right-click to paste. Click `scripts` to configure runners, tracked extensions, and other settings.
