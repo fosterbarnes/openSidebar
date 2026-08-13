@@ -3,6 +3,7 @@ import os from "node:os"
 import path from "node:path"
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+const GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 const REQUEST_TIMEOUT_MS = 15_000
 
 export type UsageWindow = {
@@ -15,6 +16,13 @@ export type OpenAIUsage = {
   ok: true
   primary: UsageWindow
   secondary: UsageWindow
+} | {
+  ok: false
+}
+
+export type OpenCodeGoUsage = {
+  ok: true
+  weekly: UsageWindow
 } | {
   ok: false
 }
@@ -91,28 +99,50 @@ function errorResult(): OpenAIUsage {
   return { ok: false }
 }
 
-export async function probeOpenAIUsage(options: UsageOptions = {}): Promise<OpenAIUsage> {
+function goErrorResult(): OpenCodeGoUsage {
+  return { ok: false }
+}
+
+async function fetchUsageResponse(
+  options: UsageOptions,
+  url: string,
+  headers: Record<string, string>,
+): Promise<unknown> {
   const fetchImpl = options.fetchImpl ?? fetch
+  const response = await fetchImpl(url, {
+    method: "GET",
+    headers,
+    signal: options.signal
+      ? AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS)])
+      : AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS),
+  })
+  if (!response.ok) throw new Error(`Usage request failed with status ${response.status}.`)
+  return response.json()
+}
+
+async function readAuthContent(options: UsageOptions): Promise<string> {
+  if (options.env?.OPENCODE_AUTH_CONTENT) return options.env.OPENCODE_AUTH_CONTENT
+  const authPaths = options.authPath
+    ? [options.authPath]
+    : [
+        resolveAuthPath({ env: options.env, homeDir: options.homeDir }),
+        path.join(options.homeDir ?? os.homedir(), ".local", "share", "opencode", "auth.json"),
+      ]
+  for (const authPath of [...new Set(authPaths)]) {
+    try {
+      return await readFile(authPath, "utf8")
+    } catch {
+      continue
+    }
+  }
+  throw new Error("auth file not found")
+}
+
+export async function probeOpenAIUsage(options: UsageOptions = {}): Promise<OpenAIUsage> {
   const nowMs = options.nowMs ?? Date.now()
   let credentials: { access: string; accountId?: string }
   try {
-    const authPaths = options.authPath
-      ? [options.authPath]
-      : [
-          resolveAuthPath({ env: options.env, homeDir: options.homeDir }),
-          path.join(options.homeDir ?? os.homedir(), ".local", "share", "opencode", "auth.json"),
-        ]
-    const raw = options.env?.OPENCODE_AUTH_CONTENT
-      ?? await (async () => {
-        for (const authPath of [...new Set(authPaths)]) {
-          try {
-            return await readFile(authPath, "utf8")
-          } catch {
-            continue
-          }
-        }
-        throw new Error("auth file not found")
-      })()
+    const raw = await readAuthContent(options)
     const openai = (JSON.parse(raw) as { openai?: { access?: unknown; accountId?: unknown } }).openai
     if (typeof openai?.access !== "string" || openai.access.trim() === "") return errorResult()
     credentials = {
@@ -124,16 +154,43 @@ export async function probeOpenAIUsage(options: UsageOptions = {}): Promise<Open
   }
 
   try {
-    const response = await fetchImpl(USAGE_URL, {
-      method: "GET",
-      headers: usageHeaders(credentials),
-      signal: options.signal
-        ? AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS)])
-        : AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS),
-    })
-    if (!response.ok) return errorResult()
-    return parseUsageResponse(await response.json(), nowMs)
+    return parseUsageResponse(await fetchUsageResponse(options, USAGE_URL, usageHeaders(credentials)), nowMs)
   } catch {
     return errorResult()
+  }
+}
+
+function parseGoUsageResponse(value: unknown): OpenCodeGoUsage {
+  if (!value || typeof value !== "object") return goErrorResult()
+  const weekly = (value as { usage?: { weekly?: unknown } }).usage?.weekly
+  if (!weekly || typeof weekly !== "object") return goErrorResult()
+  const window = weekly as { percent?: unknown; resetsAt?: unknown }
+  if (typeof window.percent !== "number" || !Number.isFinite(window.percent)) return goErrorResult()
+  if (typeof window.resetsAt !== "string" || Number.isNaN(new Date(window.resetsAt).valueOf())) return goErrorResult()
+  return {
+    ok: true,
+    weekly: {
+      usedPercent: Math.round(Math.max(0, Math.min(100, window.percent))),
+      resetAt: new Date(window.resetsAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }),
+      minutes: 7 * 24 * 60,
+    },
+  }
+}
+
+export async function probeOpenCodeGoUsage(options: UsageOptions = {}): Promise<OpenCodeGoUsage> {
+  let key: string
+  try {
+    const raw = await readAuthContent(options)
+    const credential = (JSON.parse(raw) as { "opencode-go"?: { key?: unknown } })["opencode-go"]
+    if (typeof credential?.key !== "string" || credential.key.trim() === "") return goErrorResult()
+    key = credential.key
+  } catch {
+    return goErrorResult()
+  }
+
+  try {
+    return parseGoUsageResponse(await fetchUsageResponse(options, GO_USAGE_URL, { Authorization: `Bearer ${key}`, accept: "application/json" }))
+  } catch {
+    return goErrorResult()
   }
 }

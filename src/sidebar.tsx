@@ -3,8 +3,8 @@ import type { TuiDialogSelectProps, TuiPlugin, TuiPluginModule, TuiPromptRef } f
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { BUILTIN_SHELLS, defaultScriptSettings, isDirectory, normalizeExtension, normalizeScriptSettings, parseLauncher, readScripts, readTree, rootSections, updateLanguage, WEZTERM_TERMINALS, type Script, type ScriptLanguage, type ScriptSettings, type WezTermSplitSize } from "./helpers.js"
-import { probeOpenAIUsage, type OpenAIUsage } from "./usage.js"
+import { BUILTIN_SHELLS, defaultScriptSettings, defaultSidebarSettings, displayPath, isDirectory, loadSidebarSettings, normalizeExtension, normalizeScriptSettings, parseLauncher, readScripts, readTree, rootSections, saveSidebarSettings, sessionProjectDirectory, sidebarConfigPaths, updateLanguage, WEZTERM_TERMINALS, type Script, type ScriptLanguage, type ScriptSettings, type SidebarSettings, type WezTermSplitSize } from "./helpers.js"
+import { probeOpenAIUsage, probeOpenCodeGoUsage, type OpenAIUsage, type OpenCodeGoUsage } from "./usage.js"
 import { placeScript, runScript as runNativeScript } from "./script-runner.js"
 
 const DIRECTORY_COLORS = ["#F7E9B5", "#F4E1A0", "#F1D98B", "#EED076", "#EBC861"]
@@ -64,8 +64,8 @@ function globalScriptSettings(options: unknown): ScriptSettings {
   return normalizeScriptSettings(value)
 }
 
-function loadScriptSettings(api: Parameters<TuiPlugin>[0], worktree: string, defaults: ScriptSettings): ScriptSettings {
-  return normalizeScriptSettings(api.kv.get<unknown>(scriptSettingsKey(worktree), undefined), defaults)
+function globalSidebarSettings(options: unknown): SidebarSettings {
+  return { ...defaultSidebarSettings(), scripts: globalScriptSettings(options) }
 }
 
 function loadRootState(api: Parameters<TuiPlugin>[0], sessionID: string): RootState {
@@ -140,6 +140,17 @@ function savedVariant(model: { providerID: string; id: string } | undefined): st
   }
 }
 
+function footerPath(directory: string, homeDirectory: string, branch?: string): string {
+  const normalized = directory.replaceAll("\\", "/")
+  const home = homeDirectory.replaceAll("\\", "/").replace(/\/$/, "")
+  const visible = normalized === home
+    ? "~/"
+    : normalized.startsWith(`${home}/`)
+      ? `~/${normalized.slice(home.length + 1)}`
+      : normalized
+  return branch ? `${visible}:${branch}` : visible
+}
+
 const tui: TuiPlugin = async (api, options) => {
   const currentSessionID = () => {
     const current = api.route.current
@@ -152,11 +163,20 @@ const tui: TuiPlugin = async (api, options) => {
       || api.state.path.directory
   }
   let sessionID = currentSessionID()
-  let project = projectRoot()
+  let sessionDirectory = projectRoot()
+  let project = sessionDirectory
   let rootState = loadRootState(api, sessionID)
   let root = rootState.activeRoot || project
-  const scriptDefaults = globalScriptSettings(options)
-  let scriptSettings = loadScriptSettings(api, project, scriptDefaults)
+  const pluginDefaults = globalSidebarSettings(options)
+  const initialPromptDirectory = sessionProjectDirectory(api.state.session.messages(sessionID), (messageID) => api.state.part(messageID), os.homedir())
+  let configRoot = sessionDirectory === os.homedir() ? initialPromptDirectory || sessionDirectory : sessionDirectory
+  const configPaths = sidebarConfigPaths(configRoot, os.homedir())
+  let sidebarSettings = loadSidebarSettings(configRoot, os.homedir(), configPaths.user, configPaths.project, pluginDefaults)
+  let projectConfigRoot = configRoot
+  project = sidebarSettings.projectDirectory || configRoot
+  root = sidebarSettings.fileRoots[sessionID]?.activeRoot || project
+  if (!sidebarSettings.fileRoots[sessionID]) sidebarSettings.fileRoots[sessionID] = rootState
+  let scriptSettings = sidebarSettings.scripts
   const hoverColor = midpointColor(api.theme.current.primary, DIRECTORY_COLORS[0])
   const headerButtonColor = palerColor(api.theme.current.accent)
   const promptRefs = new Map<string, TuiPromptRef>()
@@ -165,17 +185,86 @@ const tui: TuiPlugin = async (api, options) => {
   const [filesOpen, setFilesOpen] = createSignal(true)
   const [hovered, setHovered] = createSignal<string>()
   const [usage, setUsage] = createSignal<OpenAIUsage>({ ok: false })
+  const [goUsage, setGoUsage] = createSignal<OpenCodeGoUsage>({ ok: false })
   const [showRemaining, setShowRemaining] = createSignal(false)
+  const [showGoRemaining, setShowGoRemaining] = createSignal(false)
   const [model, setModel] = createSignal<SelectedModel>()
   const [variant, setVariant] = createSignal("none")
   const [expanded, setExpanded] = createSignal<Set<string>>(new Set(["."]))
   const [tree, setTree] = createSignal(readTree(root, expanded()))
-  let pins = loadPins(api, project)
-  let rootPins = loadRootPins(api, project)
+  let pins = new Set(sidebarSettings.scriptPins)
+  let rootPins = new Set(sidebarSettings.fileRootPins)
   let usageRunning = false
   const usageAbort = new AbortController()
   let modelStateWatcher: fs.FSWatcher | undefined
   let refreshCommands = () => {}
+  let visibilityRunning = false
+
+  const saveProjectSettings = () => {
+    const paths = sidebarConfigPaths(projectConfigRoot, os.homedir())
+    saveSidebarSettings(paths.project, sidebarSettings)
+  }
+
+  const loadProjectOwnedState = () => {
+    const legacyRootState = loadRootState(api, sessionID)
+    const legacyPins = loadPins(api, project)
+    const legacyRootPins = loadRootPins(api, project)
+    if (!sidebarSettings.fileRoots[sessionID] && (legacyRootState.customRoots.length > 0 || legacyRootState.activeRoot)) {
+      sidebarSettings.fileRoots[sessionID] = legacyRootState
+    }
+    if (sidebarSettings.scriptPins.length === 0 && legacyPins.size > 0) sidebarSettings.scriptPins = [...legacyPins]
+    if (sidebarSettings.fileRootPins.length === 0 && legacyRootPins.size > 0) sidebarSettings.fileRootPins = [...legacyRootPins]
+    const projectPath = sidebarConfigPaths(projectConfigRoot, os.homedir()).project
+    let hasProjectScripts = false
+    try {
+      const projectConfig = JSON.parse(fs.readFileSync(projectPath, "utf8")) as { scripts?: unknown }
+      hasProjectScripts = projectConfig.scripts !== undefined
+    } catch {
+      // Missing or malformed project config is handled by the normalized defaults.
+    }
+    if (!hasProjectScripts) {
+      const legacyScripts = api.kv.get<unknown>(scriptSettingsKey(project), undefined)
+      if (legacyScripts !== undefined) sidebarSettings.scripts = normalizeScriptSettings(legacyScripts, sidebarSettings.scripts)
+    }
+    if (!hasProjectScripts || legacyRootState.customRoots.length > 0 || legacyRootState.activeRoot || legacyPins.size > 0 || legacyRootPins.size > 0) saveProjectSettings()
+  }
+
+  const syncSidebarVisibility = async () => {
+    if (visibilityRunning) return
+    visibilityRunning = true
+    try {
+      for (const [id, visible] of [
+        ["internal:sidebar-mcp", sidebarSettings.visibility.showMcp],
+        ["internal:sidebar-lsp", sidebarSettings.visibility.showLsp],
+      ] as const) {
+        const plugin = api.plugins.list().find((item) => item.id === id)
+        if (!plugin || plugin.active === visible) continue
+        const changed = visible ? await api.plugins.activate(id) : await api.plugins.deactivate(id)
+        if (!changed) api.ui.toast({ variant: "warning", message: `Could not ${visible ? "show" : "hide"} ${id}.` })
+      }
+    } finally {
+      visibilityRunning = false
+    }
+  }
+
+  const loadProjectSettings = () => {
+    sessionDirectory = projectRoot(sessionID)
+    const promptDirectory = sessionProjectDirectory(api.state.session.messages(sessionID), (messageID) => api.state.part(messageID), os.homedir())
+    configRoot = sessionDirectory === os.homedir() ? promptDirectory || sessionDirectory : sessionDirectory
+    projectConfigRoot = configRoot
+    const paths = sidebarConfigPaths(projectConfigRoot, os.homedir())
+    sidebarSettings = loadSidebarSettings(projectConfigRoot, os.homedir(), paths.user, paths.project, pluginDefaults)
+    project = sidebarSettings.projectDirectory || projectConfigRoot
+    loadProjectOwnedState()
+    scriptSettings = sidebarSettings.scripts
+    rootState = sidebarSettings.fileRoots[sessionID] ?? { customRoots: [] }
+    root = rootState.activeRoot || project
+    pins = new Set(sidebarSettings.scriptPins)
+    rootPins = new Set(sidebarSettings.fileRootPins)
+    void syncSidebarVisibility()
+  }
+
+  loadProjectSettings()
 
   const refreshSelectedModel = (forSessionID = currentSessionID()) => {
     const next = savedModelState(api.state.session.get(forSessionID)?.agent, api.state.config)
@@ -200,8 +289,12 @@ const tui: TuiPlugin = async (api, options) => {
     if (usageRunning) return
     usageRunning = true
     try {
-      const next = await probeOpenAIUsage({ signal: usageAbort.signal })
+      const [next, nextGo] = await Promise.all([
+        probeOpenAIUsage({ signal: usageAbort.signal }),
+        probeOpenCodeGoUsage({ signal: usageAbort.signal }),
+      ])
       if (!usageAbort.signal.aborted) setUsage(next)
+      if (!usageAbort.signal.aborted) setGoUsage(nextGo)
     } finally {
       usageRunning = false
     }
@@ -210,15 +303,13 @@ const tui: TuiPlugin = async (api, options) => {
   void refreshUsage()
 
   const syncSession = (nextSessionID: string) => {
-    const nextProject = projectRoot(nextSessionID)
-    if (nextProject === project && nextSessionID === sessionID) return
+    const nextSessionDirectory = projectRoot(nextSessionID)
+    const nextPromptDirectory = sessionProjectDirectory(api.state.session.messages(nextSessionID), (messageID) => api.state.part(messageID), os.homedir())
+    const nextConfigRoot = nextSessionDirectory === os.homedir() ? nextPromptDirectory || nextSessionDirectory : nextSessionDirectory
+    if (nextConfigRoot === configRoot && nextSessionID === sessionID) return
     sessionID = nextSessionID
-    project = nextProject
-    rootState = loadRootState(api, sessionID)
-    root = rootState.activeRoot || project
-    pins = loadPins(api, project)
-    rootPins = loadRootPins(api, project)
-    scriptSettings = loadScriptSettings(api, project, scriptDefaults)
+    project = nextConfigRoot
+    loadProjectSettings()
     setScriptsOpen(true)
     setFilesOpen(true)
     setExpanded(new Set(["."]))
@@ -235,8 +326,12 @@ const tui: TuiPlugin = async (api, options) => {
     setTree(readTree(root, expanded()))
     refreshCommands()
     void refreshUsage()
+    void syncSidebarVisibility()
   }
-  const saveRootState = () => api.kv.set(rootsKey(sessionID), rootState)
+  const saveRootState = () => {
+    sidebarSettings.fileRoots[sessionID] = rootState
+    saveProjectSettings()
+  }
   const setRoot = (nextRoot: string) => {
     root = nextRoot
     const customRoots = nextRoot === project
@@ -253,7 +348,10 @@ const tui: TuiPlugin = async (api, options) => {
     setTree(readTree(root, expanded()))
     refreshCommands()
   }
-  const savePins = () => api.kv.set(pinKey(project), [...pins].sort())
+  const savePins = () => {
+    sidebarSettings.scriptPins = [...pins].sort()
+    saveProjectSettings()
+  }
   const togglePin = (name: string) => {
     if (pins.has(name)) pins.delete(name)
     else pins.add(name)
@@ -261,7 +359,10 @@ const tui: TuiPlugin = async (api, options) => {
     refreshCommands()
     api.ui.toast({ variant: "success", message: `${pins.has(name) ? "Pinned" : "Unpinned"} script: ${name}` })
   }
-  const saveRootPins = () => api.kv.set(rootPinKey(project), [...rootPins].sort())
+  const saveRootPins = () => {
+    sidebarSettings.fileRootPins = [...rootPins].sort()
+    saveProjectSettings()
+  }
   const toggleRootPin = (customRoot: string) => {
     if (rootPins.has(customRoot)) rootPins.delete(customRoot)
     else rootPins.add(customRoot)
@@ -312,7 +413,15 @@ const tui: TuiPlugin = async (api, options) => {
   }
   const usageRows = () => {
     const text = weeklyUsageText()
+    const goSnapshot = goUsage()
+    const goWeekly = goSnapshot.ok ? goSnapshot.weekly : undefined
+    const goValue = goWeekly?.usedPercent === null || goWeekly?.usedPercent === undefined
+      ? "unavailable"
+      : `${showGoRemaining() ? 100 - goWeekly.usedPercent : goWeekly.usedPercent}%`
     return <>
+      <box flexDirection="row" gap={1}>
+        <text fg={api.theme.current.text}>Weekly Usage:</text>
+      </box>
       <box
         flexDirection="row"
         gap={1}
@@ -323,15 +432,33 @@ const tui: TuiPlugin = async (api, options) => {
         }}
       >
         <text fg={api.theme.current.text}>
-          {text.remaining ? "Usage remaining:" : "Weekly usage:"}
+          {text.remaining ? "Codex remaining:" : "Codex:"}
         </text>
         <text fg={api.theme.current.textMuted}>{text.value}</text>
       </box>
       <box flexDirection="row" gap={1}>
-        <text fg={api.theme.current.textMuted}>Reset date:</text>
+        <text fg={api.theme.current.textMuted}>Reset info:</text>
         <text fg={api.theme.current.textMuted}>
           {weeklyWindow()?.resetAt || "unavailable"}
         </text>
+      </box>
+      <box
+        flexDirection="row"
+        gap={1}
+        onMouseOver={() => setHovered("go-usage")}
+        onMouseOut={() => setHovered()}
+        onMouseUp={(event) => {
+          if (event.button === 0) setShowGoRemaining((value) => !value)
+        }}
+      >
+        <text fg={api.theme.current.text}>
+          {showGoRemaining() ? "OpenCode Go remaining:" : "OpenCode Go:"}
+        </text>
+        <text fg={api.theme.current.textMuted}>{goValue}</text>
+      </box>
+      <box flexDirection="row" gap={1}>
+        <text fg={api.theme.current.textMuted}>Reset info:</text>
+        <text fg={api.theme.current.textMuted}>{goWeekly?.resetAt || "unavailable"}</text>
       </box>
     </>
   }
@@ -426,15 +553,17 @@ const tui: TuiPlugin = async (api, options) => {
   const openRootPicker = () => setTimeout(selectRoot, 100)
 
   const saveScriptSettings = (next: ScriptSettings, message = "Script settings updated") => {
-    scriptSettings = normalizeScriptSettings(next, scriptDefaults)
-    api.kv.set(scriptSettingsKey(project), scriptSettings)
+    scriptSettings = normalizeScriptSettings(next, sidebarSettings.scripts)
+    sidebarSettings.scripts = scriptSettings
+    saveProjectSettings()
     setScripts(readScripts(project, root, scriptSettings))
     refreshCommands()
     api.ui.toast({ variant: "success", message })
   }
   const resetScriptSettings = () => {
-    scriptSettings = normalizeScriptSettings(null, scriptDefaults)
-    api.kv.set(scriptSettingsKey(project), null)
+    scriptSettings = normalizeScriptSettings(null, sidebarSettings.scripts)
+    sidebarSettings.scripts = scriptSettings
+    saveProjectSettings()
     setScripts(readScripts(project, root, scriptSettings))
     refreshCommands()
     api.ui.toast({ variant: "success", message: "Script settings reset" })
@@ -550,7 +679,6 @@ const tui: TuiPlugin = async (api, options) => {
       onSelect: (option) => promptWeztermSizeValue(direction, option.value as "Percent" | "Cells"),
     }))
   }
-  const selectWeztermSize = (direction: "horizontal" | "vertical") => selectWeztermSizeMode(direction)
   const selectScriptSettings = () => {
     const defaults = defaultScriptSettings()
     const languageMap = new Map(scriptSettings.languages.map((language) => [language.id, language]))
@@ -633,7 +761,7 @@ const tui: TuiPlugin = async (api, options) => {
           saveScriptSettings({ ...scriptSettings, terminal }, terminal === "native" ? "Using native detached runner" : `Using WezTerm: ${option.title}`)
           selectScriptSettings()
         } else if (option.value.startsWith("wezterm-size:")) {
-          selectWeztermSize(option.value.slice("wezterm-size:".length) as "horizontal" | "vertical")
+          selectWeztermSizeMode(option.value.slice("wezterm-size:".length) as "horizontal" | "vertical")
         } else if (option.value.startsWith("shell:")) {
           const shell = BUILTIN_SHELLS.find((item) => `shell:${item.id}` === option.value)
           if (shell) {
@@ -743,6 +871,7 @@ const tui: TuiPlugin = async (api, options) => {
   })
   disposers.push(api.event.on("file.watcher.updated", refresh))
   disposers.push(api.event.on("tui.session.select", () => queueMicrotask(refresh)))
+  disposers.push(api.event.on("message.updated", () => queueMicrotask(refresh)))
   try {
     modelStateWatcher = fs.watch(MODEL_STATE_PATH, () => {
       refreshSelectedModel()
@@ -753,6 +882,7 @@ const tui: TuiPlugin = async (api, options) => {
   }
   refreshSelectedModel()
   refreshVariant()
+  void syncSidebarVisibility()
   api.lifecycle.onDispose(() => {
     usageAbort.abort()
     clearInterval(usageTimer)
@@ -761,12 +891,32 @@ const tui: TuiPlugin = async (api, options) => {
   })
 
   api.slots.register({
-    order: 200,
+    order: 150,
     slots: {
       sidebar_content() {
         return (
           <box flexDirection="column" gap={0}>
             {usageRows()}
+          </box>
+        )
+      },
+    },
+  })
+
+  void api.plugins.deactivate("internal:sidebar-footer")
+  api.slots.register({
+    order: 100,
+    slots: {
+      sidebar_footer(_ctx, props) {
+        const session = api.state.session.get(props.session_id)
+        const directory = session?.directory || api.state.path.directory
+        const branch = session?.directory === api.state.path.directory ? api.state.vcs?.branch : undefined
+        return (
+          <box gap={1}>
+            <text>{footerPath(directory, os.homedir(), branch)}</text>
+            <text fg={api.theme.current.textMuted}>
+              <span style={{ fg: api.theme.current.success }}>-</span> OpenCode {api.app.version}
+            </text>
           </box>
         )
       },
@@ -933,7 +1083,7 @@ const tui: TuiPlugin = async (api, options) => {
               >[{path.basename(root)}]</text>
             </box>
             <Show when={filesOpen()}>
-              <text fg={api.theme.current.textMuted}>{root}</text>
+              <text fg="#AC98C7">{displayPath(root, os.homedir())}</text>
               <box flexDirection="column" gap={1}>
                 <For each={tree()} fallback={<text fg={api.theme.current.textMuted}>No visible files</text>}>
                   {(entry) => <box

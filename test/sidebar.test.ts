@@ -3,8 +3,8 @@ import test from "node:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { defaultScriptSettings, MAX_RECENT_ROOTS, normalizeExtension, normalizeScriptSettings, parseLauncher, readScripts, readTree, rootSections } from "../src/helpers.ts"
-import { probeOpenAIUsage, resolveAuthPath } from "../src/usage.ts"
+import { defaultScriptSettings, displayPath, loadSidebarSettings, MAX_RECENT_ROOTS, normalizeExtension, normalizeSidebarSettings, normalizeScriptSettings, parseLauncher, promptProjectDirectory, readScripts, readTree, rootSections, saveSidebarSettings, sessionProjectDirectory, sidebarConfigPaths } from "../src/helpers.ts"
+import { probeOpenAIUsage, probeOpenCodeGoUsage, resolveAuthPath } from "../src/usage.ts"
 import { commandArgs, scriptCommand, weztermArgs, weztermSendArgs } from "../src/script-runner.ts"
 
 test("reads sorted package scripts", () => {
@@ -295,4 +295,164 @@ test("filters stale roots and removes duplicate recent entries", () => {
     (root) => root === "valid" || root === "favorite",
   )
   assert.deepEqual(sections, { recentRoots: ["valid"], favoriteRoots: ["favorite"] })
+})
+
+test("returns a neutral state for failed OpenAI usage requests", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-usage-"))
+  try {
+    const authPath = path.join(root, "auth.json")
+    writeFileSync(authPath, JSON.stringify({ openai: { access: "secret" } }))
+    const result = await probeOpenAIUsage({
+      authPath,
+      fetchImpl: async () => new Response("", { status: 503 }),
+    })
+    assert.deepEqual(result, { ok: false })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("parses OpenCode Go weekly usage with its reset date", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-go-usage-"))
+  try {
+    const authPath = path.join(root, "auth.json")
+    writeFileSync(authPath, JSON.stringify({ "opencode-go": { key: "secret" } }))
+    let requestUrl = ""
+    let authorization = ""
+    const result = await probeOpenCodeGoUsage({
+      authPath,
+      fetchImpl: async (url, init) => {
+        requestUrl = String(url)
+        authorization = String(new Headers(init?.headers).get("authorization"))
+        return new Response(JSON.stringify({
+          usage: { weekly: { status: "ok", percent: 27.5, resetsAt: "2026-08-17T00:00:00.000Z" } },
+        }), { status: 200 })
+      },
+    })
+    assert.equal(result.ok, true)
+    assert.equal(requestUrl, "https://opencode.ai/zen/go/v1/usage")
+    assert.equal(authorization, "Bearer secret")
+    if (result.ok) {
+      assert.equal(result.weekly.usedPercent, 28)
+      assert.equal(result.weekly.minutes, 7 * 24 * 60)
+      assert.match(result.weekly.resetAt ?? "", /2026/)
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("returns a neutral state for failed OpenCode Go usage requests", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-go-usage-"))
+  try {
+    const authPath = path.join(root, "auth.json")
+    writeFileSync(authPath, JSON.stringify({ "opencode-go": { key: "secret" } }))
+    const result = await probeOpenCodeGoUsage({
+      authPath,
+      fetchImpl: async () => new Response("", { status: 503 }),
+    })
+    assert.deepEqual(result, { ok: false })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("formats displayed paths relative to the home directory", () => {
+  assert.equal(displayPath("C:\\Users\\Foster\\Documents\\GitHub\\openSidebar", "C:\\Users\\Foster"), "/~Documents/GitHub/openSidebar")
+  assert.equal(displayPath("C:\\Users\\Foster", "C:\\Users\\Foster"), "/~")
+  assert.equal(displayPath("C:\\Work\\openSidebar", "C:\\Users\\Foster"), "C:/Work/openSidebar")
+})
+
+test("loads user sidebar settings with project overrides", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-config-"))
+  try {
+    const paths = sidebarConfigPaths(root, root)
+    mkdirSync(path.dirname(paths.user), { recursive: true })
+    mkdirSync(path.dirname(paths.project), { recursive: true })
+    writeFileSync(paths.user, JSON.stringify({ showMcp: false, showLsp: true, scripts: { terminal: "wezterm-tab" } }))
+    writeFileSync(paths.project, JSON.stringify({ showMcp: true, scripts: { terminal: "native" } }))
+    const settings = loadSidebarSettings(root, root, paths.user, paths.project)
+    assert.deepEqual(settings.visibility, { showMcp: true, showLsp: true })
+    assert.equal(settings.scripts.terminal, "native")
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("persists a project directory separately from OpenCode settings", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-config-"))
+  const projectDirectory = path.join(root, "project")
+  mkdirSync(projectDirectory)
+  try {
+    const settings = normalizeSidebarSettings({ projectDirectory })
+    assert.equal(settings.projectDirectory, projectDirectory)
+    assert.equal(normalizeSidebarSettings({ projectDirectory: path.join(root, "missing") }).projectDirectory, undefined)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolves a project from an initial cd prompt without changing directories", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-config-"))
+  const project = path.join(root, "crow")
+  mkdirSync(project)
+  try {
+    assert.equal(promptProjectDirectory(`cd ${project}`, root), project)
+    assert.equal(promptProjectDirectory(`"cd ${project}"`, root), project)
+    assert.equal(promptProjectDirectory(`cd ${path.join(root, "missing")}`, root), undefined)
+    assert.equal(promptProjectDirectory(`Set directory to ${project}`, root), undefined)
+    assert.equal(sessionProjectDirectory([{ id: "message", role: "user" }], () => [{ type: "text", text: `cd ${project}` }], root), project)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("sidebar settings default to showing MCP and LSP and ignore malformed files", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-config-"))
+  try {
+    const paths = sidebarConfigPaths(root, root)
+    mkdirSync(path.dirname(paths.user), { recursive: true })
+    writeFileSync(paths.user, "not json")
+    assert.deepEqual(loadSidebarSettings(root, root, paths.user, path.join(root, "missing.json")).visibility, {
+      showMcp: true,
+      showLsp: true,
+    })
+    assert.deepEqual(normalizeSidebarSettings({ showMcp: false, showLsp: "yes" }).visibility, {
+      showMcp: false,
+      showLsp: true,
+    })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("normalizes persisted pins and session roots", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-config-"))
+  const custom = path.join(root, "custom")
+  mkdirSync(custom)
+  try {
+    const settings = normalizeSidebarSettings({
+      scriptPins: ["build", "build", 4],
+      fileRootPins: [custom, "missing"],
+      fileRoots: { session: { customRoots: [custom, custom], activeRoot: custom } },
+    })
+    assert.deepEqual(settings.scriptPins, ["build"])
+    assert.deepEqual(settings.fileRootPins, [custom])
+    assert.deepEqual(settings.fileRoots.session, { customRoots: [custom], activeRoot: custom })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("writes complete sidebar settings as JSON", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-config-"))
+  try {
+    const filePath = path.join(root, ".config", "openSidebar.json")
+    const settings = defaultScriptSettings()
+    const sidebar = normalizeSidebarSettings({ scripts: settings, scriptPins: ["build"] })
+    saveSidebarSettings(filePath, sidebar)
+    assert.deepEqual(loadSidebarSettings(root, root, path.join(root, "missing-user.json"), filePath).scriptPins, ["build"])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

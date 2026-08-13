@@ -1,0 +1,11 @@
+{
+  "projectDirectory": "C:\\Users\\Foster\\Documents\\GitHub\\project",
+  "showMcp": true,
+  "showLsp": true,
+  "scripts": {
+    "terminal": "native"
+  },
+  "scriptPins": [],
+  "fileRootPins": [],
+  "fileRoots": {}
+}

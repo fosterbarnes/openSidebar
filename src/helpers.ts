@@ -1,4 +1,5 @@
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 
 const IGNORED_DIRECTORIES = new Set([".git", "node_modules", "dist", "build", "coverage"])
@@ -32,6 +33,18 @@ export type ScriptSettings = {
   terminal: ScriptTerminal
   wezterm: WezTermSettings
   languages: ScriptLanguage[]
+}
+
+export type SidebarSettings = {
+  projectDirectory?: string
+  visibility: {
+    showMcp: boolean
+    showLsp: boolean
+  }
+  scripts: ScriptSettings
+  scriptPins: string[]
+  fileRootPins: string[]
+  fileRoots: Record<string, { customRoots: string[]; activeRoot?: string }>
 }
 
 const DEFAULT_SCRIPT_SETTINGS: ScriptSettings = {
@@ -140,6 +153,16 @@ export function defaultScriptSettings(): ScriptSettings {
   return cloneSettings(DEFAULT_SCRIPT_SETTINGS)
 }
 
+export function defaultSidebarSettings(): SidebarSettings {
+  return {
+    visibility: { showMcp: true, showLsp: true },
+    scripts: defaultScriptSettings(),
+    scriptPins: [],
+    fileRootPins: [],
+    fileRoots: {},
+  }
+}
+
 export function normalizeScriptSettings(value: unknown, base = defaultScriptSettings()): ScriptSettings {
   if (!value || typeof value !== "object") return cloneSettings(base)
   const input = value as { shell?: unknown; terminal?: unknown; wezterm?: unknown; languages?: unknown }
@@ -169,6 +192,114 @@ export function normalizeScriptSettings(value: unknown, base = defaultScriptSett
     },
     languages,
   }
+}
+
+export function normalizeSidebarSettings(value: unknown, base = defaultSidebarSettings()): SidebarSettings {
+  if (!value || typeof value !== "object") return {
+    projectDirectory: base.projectDirectory,
+    visibility: { ...base.visibility },
+    scripts: cloneSettings(base.scripts),
+    scriptPins: [...base.scriptPins],
+    fileRootPins: [...base.fileRootPins],
+    fileRoots: structuredClone(base.fileRoots),
+  }
+  const input = value as { projectDirectory?: unknown; showMcp?: unknown; showLsp?: unknown; scripts?: unknown; scriptPins?: unknown; fileRootPins?: unknown; fileRoots?: unknown }
+  const fileRoots: SidebarSettings["fileRoots"] = { ...base.fileRoots }
+  if (input.fileRoots && typeof input.fileRoots === "object") {
+    for (const [sessionID, rawState] of Object.entries(input.fileRoots)) {
+      if (!rawState || typeof rawState !== "object") continue
+      const state = rawState as { customRoots?: unknown; activeRoot?: unknown }
+      const customRoots = Array.isArray(state.customRoots)
+        ? [...new Set(state.customRoots.filter((item): item is string => typeof item === "string" && isDirectory(item)))]
+        : []
+      fileRoots[sessionID] = {
+        customRoots,
+        activeRoot: typeof state.activeRoot === "string" && customRoots.includes(state.activeRoot) ? state.activeRoot : undefined,
+      }
+    }
+  }
+  return {
+    projectDirectory: typeof input.projectDirectory === "string" && isDirectory(input.projectDirectory)
+      ? input.projectDirectory
+      : base.projectDirectory,
+    visibility: {
+      showMcp: typeof input.showMcp === "boolean" ? input.showMcp : base.visibility.showMcp,
+      showLsp: typeof input.showLsp === "boolean" ? input.showLsp : base.visibility.showLsp,
+    },
+    scripts: normalizeScriptSettings(input.scripts, base.scripts),
+    scriptPins: Array.isArray(input.scriptPins)
+      ? [...new Set(input.scriptPins.filter((item): item is string => typeof item === "string"))]
+      : [...base.scriptPins],
+    fileRootPins: Array.isArray(input.fileRootPins)
+      ? [...new Set(input.fileRootPins.filter((item): item is string => typeof item === "string" && isDirectory(item)))]
+      : [...base.fileRootPins],
+    fileRoots,
+  }
+}
+
+export function sidebarConfigPaths(projectRoot: string, homeDirectory = os.homedir()): { user: string; project: string } {
+  return {
+    user: path.join(homeDirectory, ".config", "openSidebar", "config.json"),
+    project: path.join(projectRoot, ".config", "openSidebar.json"),
+  }
+}
+
+export function promptProjectDirectory(prompt: unknown, homeDirectory = os.homedir()): string | undefined {
+  if (typeof prompt !== "string") return undefined
+  const match = prompt.trim().replace(/^(["']).*\1$/, (value) => value.slice(1, -1)).match(/^cd\s+(.+?)\s*$/i)
+  if (!match) return undefined
+  const candidate = match[1].trim().replace(/^['"]|['"]$/g, "")
+  return path.isAbsolute(candidate) && candidate !== homeDirectory && isDirectory(candidate) ? path.normalize(candidate) : undefined
+}
+
+export function sessionProjectDirectory(
+  messages: readonly unknown[],
+  partsForMessage: (messageID: string) => readonly unknown[],
+  homeDirectory = os.homedir(),
+): string | undefined {
+  for (const message of messages) {
+    if (!message || typeof message !== "object") continue
+    const value = message as { id?: unknown; role?: unknown }
+    if (value.role !== "user" || typeof value.id !== "string") continue
+    for (const part of partsForMessage(value.id)) {
+      if (!part || typeof part !== "object") continue
+      const text = (part as { type?: unknown; text?: unknown })
+      if (text.type === "text") {
+        const directory = promptProjectDirectory(text.text, homeDirectory)
+        if (directory) return directory
+      }
+    }
+  }
+  return undefined
+}
+
+function readJsonFile(filePath: string): unknown {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"))
+  } catch {
+    return undefined
+  }
+}
+
+export function loadSidebarSettings(
+  projectRoot: string,
+  homeDirectory = os.homedir(),
+  userPath = sidebarConfigPaths(projectRoot, homeDirectory).user,
+  projectPath = sidebarConfigPaths(projectRoot, homeDirectory).project,
+  base = defaultSidebarSettings(),
+): SidebarSettings {
+  const user = readJsonFile(userPath)
+  const project = readJsonFile(projectPath)
+  const userSettings = normalizeSidebarSettings(user, base)
+  return normalizeSidebarSettings(project, userSettings)
+}
+
+export function saveSidebarSettings(filePath: string, settings: SidebarSettings): void {
+  const directory = path.dirname(filePath)
+  fs.mkdirSync(directory, { recursive: true })
+  const temporary = `${filePath}.tmp-${process.pid}`
+  fs.writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, "utf8")
+  fs.renameSync(temporary, filePath)
 }
 
 export function parseLauncher(value: string): string[] | undefined {
@@ -216,6 +347,12 @@ export function isDirectory(value: string): boolean {
   } catch {
     return false
   }
+}
+
+export function displayPath(value: string, homeDirectory: string): string {
+  const normalized = value.replaceAll("\\", "/")
+  const home = homeDirectory.replaceAll("\\", "/").replace(/\/$/, "")
+  return normalized === home ? "/~" : normalized.startsWith(`${home}/`) ? `/~${normalized.slice(home.length + 1)}` : normalized
 }
 
 export function rootSections(

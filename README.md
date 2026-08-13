@@ -37,6 +37,34 @@ Built with wezterm, pwsh and Windows in mind first, so un-tested issues may come
 
 Browse/copy files in-terminal. Click to change dir.
 
+When launched with `oc <directory>`, a fresh session uses the project name. The
+first duplicate gets a numeric suffix such as `openSidebar1`, followed by
+`openSidebar2` as needed. Existing sessions are never renamed. The Files and
+Scripts sections use the stored project directory automatically.
+
+### Configuration
+
+The sidebar shows MCP and LSP sections by default. To hide either section without
+disabling its underlying service, create `%USERPROFILE%\.config\openSidebar\config.json`:
+
+```json
+{
+  "showMcp": false,
+  "showLsp": true
+}
+```
+
+Project-specific overrides go in `.config\openSidebar.json` under the project. The
+sidebar loads user settings first, then overlays project values when that file exists;
+values missing from the project file continue to come from the user config. Use
+`config.example.json` as a reference for the currently configurable settings.
+`projectDirectory` sets the directory used by Files and Scripts independently of the
+OpenCode session directory. Script pins, file-root history, favorite roots,
+and per-session active roots are also stored there. OpenCode-owned settings such as
+sessions, models, MCP services, LSP services, and authentication remain in OpenCode.
+The initial `cd <directory>` prompt may be quoted by the terminal; openSidebar accepts
+that form when locating the project's config.
+
 ## Install
 1. Open `%USERPROFILE%\.config\opencode\tui.json`
 2. Add:
