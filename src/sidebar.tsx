@@ -395,24 +395,26 @@ const tui: TuiPlugin = async (api, options) => {
       api.ui.toast({ variant: "error", message: `Could not place ${script.name}: ${result.error}` })
     }
   }
-  const weeklyWindow = () => {
+  const weeklyUsage = () => {
     const snapshot = usage()
-    if (!snapshot.ok) return undefined
-    return snapshot.primary.minutes !== null && snapshot.primary.minutes >= 7 * 24 * 60
+    if (!snapshot.ok) return { window: undefined, reauthenticate: snapshot.reason === "reauthenticate" }
+    const window = snapshot.primary.minutes !== null && snapshot.primary.minutes >= 7 * 24 * 60
       ? snapshot.primary
       : snapshot.secondary.minutes !== null && snapshot.secondary.minutes >= 7 * 24 * 60
         ? snapshot.secondary
         : undefined
+    return { window, reauthenticate: false }
   }
-  const weeklyUsageText = () => {
-    const weekly = weeklyWindow()
-    if (!weekly || weekly.usedPercent === null) return { value: "unavailable", remaining: false }
+  const weeklyUsageText = (weekly = weeklyUsage()) => {
+    if (weekly.reauthenticate) return { value: "run /connect", remaining: false }
+    if (!weekly.window || weekly.window.usedPercent === null) return { value: "unavailable", remaining: false }
     return showRemaining()
-      ? { value: `${100 - weekly.usedPercent}%`, remaining: true }
-      : { value: `${weekly.usedPercent}%`, remaining: false }
+      ? { value: `${100 - weekly.window.usedPercent}%`, remaining: true }
+      : { value: `${weekly.window.usedPercent}%`, remaining: false }
   }
   const usageRows = () => {
-    const text = weeklyUsageText()
+    const weekly = weeklyUsage()
+    const text = weeklyUsageText(weekly)
     const goSnapshot = goUsage()
     const goWeekly = goSnapshot.ok ? goSnapshot.weekly : undefined
     const goValue = goWeekly?.usedPercent === null || goWeekly?.usedPercent === undefined
@@ -439,7 +441,7 @@ const tui: TuiPlugin = async (api, options) => {
       <box flexDirection="row" gap={1}>
         <text fg={api.theme.current.textMuted}>Reset info:</text>
         <text fg={api.theme.current.textMuted}>
-          {weeklyWindow()?.resetAt || "unavailable"}
+          {weekly.window?.resetAt || (weekly.reauthenticate ? "OpenAI auth required" : "unavailable")}
         </text>
       </box>
       <box
@@ -1122,7 +1124,7 @@ const tui: TuiPlugin = async (api, options) => {
 }
 
 const plugin: TuiPluginModule & { id: string } = {
-  id: "opencode.sidebar-tools",
+  id: "openSidebar",
   tui,
 }
 

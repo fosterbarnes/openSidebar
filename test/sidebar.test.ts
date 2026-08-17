@@ -50,7 +50,7 @@ test("resolves OpenCode auth paths and parses subscription windows", async () =>
   const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-usage-"))
   try {
     const authPath = path.join(root, "auth.json")
-    writeFileSync(authPath, JSON.stringify({ openai: { access: "secret", accountId: "account" } }))
+    writeFileSync(authPath, JSON.stringify({ openai: { access: "secret", accountId: "account", expires: Date.now() + 60_000 } }))
     let requestUrl = ""
     let requestMethod = ""
     const result = await probeOpenAIUsage({
@@ -138,6 +138,42 @@ test("accepts accounts with no secondary usage window", async () => {
 test("returns a neutral state when OpenCode is not connected to OpenAI", async () => {
   const result = await probeOpenAIUsage({ authPath: path.join(os.tmpdir(), "missing-openai-auth.json") })
   assert.deepEqual(result, { ok: false })
+})
+
+test("requires reauthentication for an expired OpenAI OAuth credential", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-usage-"))
+  try {
+    const authPath = path.join(root, "auth.json")
+    writeFileSync(authPath, JSON.stringify({ openai: { access: "secret", expires: 1_000 } }))
+    let requested = false
+    const result = await probeOpenAIUsage({
+      authPath,
+      nowMs: 2_000,
+      fetchImpl: async () => {
+        requested = true
+        return new Response("", { status: 200 })
+      },
+    })
+    assert.deepEqual(result, { ok: false, reason: "reauthenticate" })
+    assert.equal(requested, false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("requires reauthentication for an unauthorized OpenAI usage request", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-usage-"))
+  try {
+    const authPath = path.join(root, "auth.json")
+    writeFileSync(authPath, JSON.stringify({ openai: { access: "secret" } }))
+    const result = await probeOpenAIUsage({
+      authPath,
+      fetchImpl: async () => new Response("", { status: 401 }),
+    })
+    assert.deepEqual(result, { ok: false, reason: "reauthenticate" })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test("filters generated directories and respects expansion", () => {

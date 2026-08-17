@@ -18,6 +18,16 @@ export type OpenAIUsage = {
   secondary: UsageWindow
 } | {
   ok: false
+  reason?: "reauthenticate"
+}
+
+class UsageRequestError extends Error {
+  readonly status: number
+
+  constructor(status: number) {
+    super(`Usage request failed with status ${status}.`)
+    this.status = status
+  }
 }
 
 export type OpenCodeGoUsage = {
@@ -116,7 +126,7 @@ async function fetchUsageResponse(
       ? AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS)])
       : AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS),
   })
-  if (!response.ok) throw new Error(`Usage request failed with status ${response.status}.`)
+  if (!response.ok) throw new UsageRequestError(response.status)
   return response.json()
 }
 
@@ -143,7 +153,10 @@ export async function probeOpenAIUsage(options: UsageOptions = {}): Promise<Open
   let credentials: { access: string; accountId?: string }
   try {
     const raw = await readAuthContent(options)
-    const openai = (JSON.parse(raw) as { openai?: { access?: unknown; accountId?: unknown } }).openai
+    const openai = (JSON.parse(raw) as { openai?: { access?: unknown; accountId?: unknown; expires?: unknown } }).openai
+    if (typeof openai?.expires === "number" && Number.isFinite(openai.expires) && openai.expires <= nowMs) {
+      return { ok: false, reason: "reauthenticate" }
+    }
     if (typeof openai?.access !== "string" || openai.access.trim() === "") return errorResult()
     credentials = {
       access: openai.access,
@@ -155,7 +168,10 @@ export async function probeOpenAIUsage(options: UsageOptions = {}): Promise<Open
 
   try {
     return parseUsageResponse(await fetchUsageResponse(options, USAGE_URL, usageHeaders(credentials)), nowMs)
-  } catch {
+  } catch (error) {
+    if (error instanceof UsageRequestError && error.status === 401) {
+      return { ok: false, reason: "reauthenticate" }
+    }
     return errorResult()
   }
 }

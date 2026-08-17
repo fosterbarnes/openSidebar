@@ -1,15 +1,13 @@
-v1.2.2
+Fixes. v1.2.6
 
-Script configuration
-- Choose which shell runs project scripts, including PowerShell 7, sh, Bash, Zsh, and cmd.
-- Run supported script files with Python, Node.js, TypeScript, Ruby, PHP, and other configured launchers.
-- Enable or disable script languages and tracked file extensions.
-- Add custom script executables and file extensions.
-- Set global defaults while keeping project-specific overrides.
+Settings
+- Project-specific openSidebar settings now override user settings
 
-WezTerm
-- Run scripts in a new tab, new window, horizontal split, or vertical split.
-- WezTerm uses the configured shell and preserves each script's selected runner.
-- Configure horizontal and vertical split sizes using percentages or cell counts.
-- The Scripts menu shows only the size setting relevant to the selected split direction.
+Weekly Usage
+- Tells you when to reconnect if usage is unavailable
 
+Plugin
+- Correctly named 'openSidebar' in OpenCode plugins menu
+
+Maintenance
+- Cleaned up duplicate work without changing behavior
