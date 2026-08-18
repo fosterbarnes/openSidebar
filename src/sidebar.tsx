@@ -3,8 +3,8 @@ import type { TuiDialogSelectProps, TuiPlugin, TuiPluginModule, TuiPromptRef } f
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { BUILTIN_SHELLS, defaultScriptSettings, defaultSidebarSettings, displayPath, isDirectory, loadSidebarSettings, normalizeExtension, normalizeScriptSettings, parseLauncher, readScripts, readTree, rootSections, saveSidebarSettings, sessionProjectDirectory, sidebarConfigPaths, updateLanguage, WEZTERM_TERMINALS, type Script, type ScriptLanguage, type ScriptSettings, type SidebarSettings, type WezTermSplitSize } from "./helpers.js"
-import { probeOpenAIUsage, probeOpenCodeGoUsage, type OpenAIUsage, type OpenCodeGoUsage } from "./usage.js"
+import { BUILTIN_SHELLS, clearCursorSessionToken, defaultScriptSettings, defaultSidebarSettings, dedupeRootPaths, displayPath, isDirectory, loadSidebarSettings, normalizeExtension, normalizeRootPath, normalizeScriptSettings, parseLauncher, readCursorSessionToken, readScripts, readTree, rootSections, runEverythingSearch, sameRootPath, saveSidebarSettings, sessionProjectDirectory, sidebarConfigPaths, updateLanguage, WEZTERM_TERMINALS, writeCursorSessionToken, type Script, type ScriptLanguage, type ScriptSettings, type SidebarSettings, type WezTermSplitSize } from "./helpers.js"
+import { cursorSessionCookie, probeCursorUsage, probeOpenAIUsage, probeOpenCodeGoUsage, probeOpenRouterUsage, type CursorUsage, type OpenAIUsage, type OpenCodeGoUsage, type OpenRouterUsage } from "./usage.js"
 import { placeScript, runScript as runNativeScript } from "./script-runner.js"
 
 const DIRECTORY_COLORS = ["#F7E9B5", "#F4E1A0", "#F1D98B", "#EED076", "#EBC861"]
@@ -12,8 +12,8 @@ const DIRECTORY_INDICATOR_COLORS = ["#DCCF99", "#D5C184", "#CEB56F", "#C7A95A", 
 const MAX_TREE_ITEMS = 80
 const ADD_ROOT = "__sidebar_add_custom_root__"
 const RESET_ROOT = "__sidebar_reset_project_root__"
-const RECENT_ROOTS = "__sidebar_recent_custom_roots__"
-const FAVORITE_ROOTS = "__sidebar_favorite_custom_roots__"
+const FAVORITE_HELP = "__sidebar_favorite_help__"
+const FILE_ROOT_PREFIX = "file:"
 const ADD_SCRIPT_EXECUTABLE = "__sidebar_add_script_executable__"
 const ADD_SCRIPT_EXTENSION = "__sidebar_add_script_extension__"
 const RESET_SCRIPT_SETTINGS = "__sidebar_reset_script_settings__"
@@ -43,8 +43,8 @@ function pinKey(worktree: string): string {
   return `opencode-sidebar-tools:pins:${worktree}`
 }
 
-function rootPinKey(worktree: string): string {
-  return `opencode-sidebar-tools:file-root-pins:${worktree}`
+function favoriteRootKey(worktree: string): string {
+  return `opencode-sidebar-tools:favorite-file-roots:${worktree}`
 }
 
 function rootsKey(sessionID: string): string {
@@ -87,7 +87,7 @@ function loadPins(api: Parameters<TuiPlugin>[0], worktree: string): Set<string> 
 }
 
 function loadRootPins(api: Parameters<TuiPlugin>[0], worktree: string): Set<string> {
-  const value = api.kv.get<unknown>(rootPinKey(worktree), [])
+  const value = api.kv.get<unknown>(favoriteRootKey(worktree), [])
   return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && isDirectory(item)) : [])
 }
 
@@ -186,14 +186,19 @@ const tui: TuiPlugin = async (api, options) => {
   const [hovered, setHovered] = createSignal<string>()
   const [usage, setUsage] = createSignal<OpenAIUsage>({ ok: false })
   const [goUsage, setGoUsage] = createSignal<OpenCodeGoUsage>({ ok: false })
+  const [openRouterUsage, setOpenRouterUsage] = createSignal<OpenRouterUsage>({ ok: false })
+  const [cursorUsage, setCursorUsage] = createSignal<CursorUsage>({ ok: false })
   const [showRemaining, setShowRemaining] = createSignal(false)
   const [showGoRemaining, setShowGoRemaining] = createSignal(false)
+  const [showOrRemaining, setShowOrRemaining] = createSignal(false)
+  const [showCursorRemaining, setShowCursorRemaining] = createSignal(false)
   const [model, setModel] = createSignal<SelectedModel>()
   const [variant, setVariant] = createSignal("none")
   const [expanded, setExpanded] = createSignal<Set<string>>(new Set(["."]))
   const [tree, setTree] = createSignal(readTree(root, expanded()))
   let pins = new Set(sidebarSettings.scriptPins)
-  let rootPins = new Set(sidebarSettings.fileRootPins)
+  let favorites = new Set(sidebarSettings.favoriteFileRoots)
+  let cursorSessionToken = readCursorSessionToken(os.homedir())
   let usageRunning = false
   const usageAbort = new AbortController()
   let modelStateWatcher: fs.FSWatcher | undefined
@@ -212,8 +217,11 @@ const tui: TuiPlugin = async (api, options) => {
     if (!sidebarSettings.fileRoots[sessionID] && (legacyRootState.customRoots.length > 0 || legacyRootState.activeRoot)) {
       sidebarSettings.fileRoots[sessionID] = legacyRootState
     }
+    if (sidebarSettings.recentFileRoots.length === 0 && legacyRootState.customRoots.length > 0) {
+      sidebarSettings.recentFileRoots = dedupeRootPaths(legacyRootState.customRoots)
+    }
     if (sidebarSettings.scriptPins.length === 0 && legacyPins.size > 0) sidebarSettings.scriptPins = [...legacyPins]
-    if (sidebarSettings.fileRootPins.length === 0 && legacyRootPins.size > 0) sidebarSettings.fileRootPins = [...legacyRootPins]
+    if (sidebarSettings.favoriteFileRoots.length === 0 && legacyRootPins.size > 0) sidebarSettings.favoriteFileRoots = [...legacyRootPins]
     const projectPath = sidebarConfigPaths(projectConfigRoot, os.homedir()).project
     let hasProjectScripts = false
     try {
@@ -258,9 +266,16 @@ const tui: TuiPlugin = async (api, options) => {
     loadProjectOwnedState()
     scriptSettings = sidebarSettings.scripts
     rootState = sidebarSettings.fileRoots[sessionID] ?? { customRoots: [] }
-    root = rootState.activeRoot || project
+    favorites = new Set(dedupeRootPaths(sidebarSettings.favoriteFileRoots))
+    sidebarSettings.favoriteFileRoots = [...favorites]
+    sidebarSettings.recentFileRoots = dedupeRootPaths(sidebarSettings.recentFileRoots)
+    const sections = rootSections(sidebarSettings.recentFileRoots, [...favorites])
+    rootState = {
+      customRoots: [...sections.recentRoots, ...sections.favoriteRoots],
+      activeRoot: rootState.activeRoot,
+    }
+    root = rootState.activeRoot ? normalizeRootPath(rootState.activeRoot) : project
     pins = new Set(sidebarSettings.scriptPins)
-    rootPins = new Set(sidebarSettings.fileRootPins)
     void syncSidebarVisibility()
   }
 
@@ -289,12 +304,22 @@ const tui: TuiPlugin = async (api, options) => {
     if (usageRunning) return
     usageRunning = true
     try {
-      const [next, nextGo] = await Promise.all([
+      const [next, nextGo, nextOpenRouter, nextCursor] = await Promise.all([
         probeOpenAIUsage({ signal: usageAbort.signal }),
         probeOpenCodeGoUsage({ signal: usageAbort.signal }),
+        probeOpenRouterUsage({ signal: usageAbort.signal }),
+        probeCursorUsage({ signal: usageAbort.signal, cursorSessionToken }),
       ])
+      let cursor = nextCursor
+      if (!cursor.ok && cursor.reason === "reauthenticate" && cursorSessionToken) {
+        clearCursorSessionToken(os.homedir())
+        cursorSessionToken = undefined
+        cursor = await probeCursorUsage({ signal: usageAbort.signal })
+      }
       if (!usageAbort.signal.aborted) setUsage(next)
       if (!usageAbort.signal.aborted) setGoUsage(nextGo)
+      if (!usageAbort.signal.aborted) setOpenRouterUsage(nextOpenRouter)
+      if (!usageAbort.signal.aborted) setCursorUsage(cursor)
     } finally {
       usageRunning = false
     }
@@ -328,21 +353,28 @@ const tui: TuiPlugin = async (api, options) => {
     void refreshUsage()
     void syncSidebarVisibility()
   }
-  const saveRootState = () => {
-    sidebarSettings.fileRoots[sessionID] = rootState
-    saveProjectSettings()
-  }
-  const setRoot = (nextRoot: string) => {
-    root = nextRoot
-    const customRoots = nextRoot === project
-      ? rootState.customRoots
-      : [nextRoot, ...rootState.customRoots]
-    const sections = rootSections(customRoots, [...rootPins])
+  const syncStoredRootState = () => {
+    const sections = rootSections(sidebarSettings.recentFileRoots, [...favorites])
     rootState = {
       customRoots: [...sections.recentRoots, ...sections.favoriteRoots],
-      activeRoot: nextRoot === project ? undefined : nextRoot,
+      activeRoot: sameRootPath(root, project) ? undefined : normalizeRootPath(root),
     }
-    saveRootState()
+    sidebarSettings.fileRoots[sessionID] = rootState
+  }
+
+  const isFavorite = (directory: string) => [...favorites].some((item) => sameRootPath(item, directory))
+
+  const setRoot = (nextRoot: string) => {
+    const canonical = normalizeRootPath(nextRoot)
+    root = canonical
+    if (!sameRootPath(canonical, project)) {
+      sidebarSettings.recentFileRoots = rootSections(
+        [canonical, ...sidebarSettings.recentFileRoots],
+        [...favorites],
+      ).recentRoots
+    }
+    syncStoredRootState()
+    saveProjectSettings()
     setExpanded(new Set(["."]))
     setScripts(readScripts(project, root, scriptSettings))
     setTree(readTree(root, expanded()))
@@ -359,19 +391,18 @@ const tui: TuiPlugin = async (api, options) => {
     refreshCommands()
     api.ui.toast({ variant: "success", message: `${pins.has(name) ? "Pinned" : "Unpinned"} script: ${name}` })
   }
-  const saveRootPins = () => {
-    sidebarSettings.fileRootPins = [...rootPins].sort()
+  const toggleFavorite = (customRoot: string) => {
+    const canonical = normalizeRootPath(customRoot)
+    const existing = [...favorites].find((item) => sameRootPath(item, canonical))
+    if (existing) favorites.delete(existing)
+    else favorites.add(canonical)
+    favorites = new Set(dedupeRootPaths([...favorites]))
+    sidebarSettings.favoriteFileRoots = [...favorites].sort()
+    sidebarSettings.recentFileRoots = rootSections(sidebarSettings.recentFileRoots, [...favorites]).recentRoots
+    syncStoredRootState()
     saveProjectSettings()
-  }
-  const toggleRootPin = (customRoot: string) => {
-    if (rootPins.has(customRoot)) rootPins.delete(customRoot)
-    else rootPins.add(customRoot)
-    const sections = rootSections(rootState.customRoots, [...rootPins])
-    rootState = { ...rootState, customRoots: [...sections.recentRoots, ...sections.favoriteRoots] }
-    saveRootState()
-    saveRootPins()
     refreshCommands()
-    api.ui.toast({ variant: "success", message: `${rootPins.has(customRoot) ? "Pinned" : "Unpinned"} root: ${customRoot}` })
+    api.ui.toast({ variant: "success", message: `${isFavorite(canonical) ? "Favorited" : "Unfavorited"} root: ${canonical}` })
   }
   const runScript = async (script: Script) => {
     const current = api.route.current
@@ -408,10 +439,33 @@ const tui: TuiPlugin = async (api, options) => {
   const weeklyUsageText = (weekly = weeklyUsage()) => {
     if (weekly.reauthenticate) return { value: "run /connect", remaining: false }
     if (!weekly.window || weekly.window.usedPercent === null) return { value: "unavailable", remaining: false }
-    return showRemaining()
+return showRemaining()
       ? { value: `${100 - weekly.window.usedPercent}%`, remaining: true }
       : { value: `${weekly.window.usedPercent}%`, remaining: false }
   }
+  const promptCursorToken = () => api.ui.dialog.replace(() => api.ui.DialogPrompt({
+    title: "Connect Cursor usage",
+    description: () => <text>
+      1. Open cursor.com in a browser while logged in (or stay signed into the Cursor app).
+      2. If the app is signed in, cancel and wait: the sidebar will retry from the app.
+      3. Otherwise: in the browser, open DevTools, Application (or Storage), Cookies, cursor.com, copy the value of WorkosCursorSessionToken.
+      4. Paste that value here (a long user::eyJ... string is fine).
+    </text>,
+    placeholder: "user::eyJ...",
+    onConfirm: (value) => {
+      const trimmed = value.trim()
+      if (!cursorSessionCookie(trimmed)) {
+        api.ui.toast({ variant: "error", message: "That does not look like a Cursor session cookie" })
+        return
+      }
+      writeCursorSessionToken(os.homedir(), trimmed)
+      cursorSessionToken = trimmed
+      api.ui.toast({ variant: "success", message: "Cursor usage connected" })
+      api.ui.dialog.clear()
+      void refreshUsage()
+    },
+    onCancel: () => api.ui.dialog.clear(),
+  }))
   const usageRows = () => {
     const weekly = weeklyUsage()
     const text = weeklyUsageText(weekly)
@@ -420,6 +474,17 @@ const tui: TuiPlugin = async (api, options) => {
     const goValue = goWeekly?.usedPercent === null || goWeekly?.usedPercent === undefined
       ? "unavailable"
       : `${showGoRemaining() ? 100 - goWeekly.usedPercent : goWeekly.usedPercent}%`
+    const orSnapshot = openRouterUsage()
+    const orOk = orSnapshot.ok ? orSnapshot : undefined
+    const orValue = orOk
+      ? `${showOrRemaining() ? orOk.remainingPercent : orOk.usedPercent}%`
+      : "unavailable"
+    const cursorSnapshot = cursorUsage()
+    const cursorOk = cursorSnapshot.ok ? cursorSnapshot.monthly : undefined
+    const cursorValue = cursorOk?.usedPercent === null || cursorOk?.usedPercent === undefined
+      ? "unavailable"
+      : `${showCursorRemaining() ? 100 - cursorOk.usedPercent : cursorOk.usedPercent}%`
+    const cursorNeedsToken = !cursorSnapshot.ok && (cursorSnapshot.reason === "need-token" || cursorSnapshot.reason === "reauthenticate")
     return <>
       <box flexDirection="row" gap={1}>
         <text fg={api.theme.current.text}>Weekly Usage:</text>
@@ -439,7 +504,7 @@ const tui: TuiPlugin = async (api, options) => {
         <text fg={api.theme.current.textMuted}>{text.value}</text>
       </box>
       <box flexDirection="row" gap={1}>
-        <text fg={api.theme.current.textMuted}>Reset info:</text>
+        <text fg={api.theme.current.textMuted}>resets on</text>
         <text fg={api.theme.current.textMuted}>
           {weekly.window?.resetAt || (weekly.reauthenticate ? "OpenAI auth required" : "unavailable")}
         </text>
@@ -459,9 +524,62 @@ const tui: TuiPlugin = async (api, options) => {
         <text fg={api.theme.current.textMuted}>{goValue}</text>
       </box>
       <box flexDirection="row" gap={1}>
-        <text fg={api.theme.current.textMuted}>Reset info:</text>
+        <text fg={api.theme.current.textMuted}>resets on</text>
         <text fg={api.theme.current.textMuted}>{goWeekly?.resetAt || "unavailable"}</text>
       </box>
+      <box
+        flexDirection="row"
+        gap={1}
+        onMouseOver={() => setHovered("or-usage")}
+        onMouseOut={() => setHovered()}
+        onMouseUp={(event) => {
+          if (event.button === 0) setShowOrRemaining((value) => !value)
+        }}
+      >
+        <text fg={api.theme.current.text}>
+          {orOk && showOrRemaining() ? "OpenRouter remaining:" : "OpenRouter:"}
+        </text>
+        <text fg={api.theme.current.textMuted}>{orValue}</text>
+      </box>
+      <Show when={orOk}>
+        <box flexDirection="row" gap={1}>
+          <text fg={api.theme.current.textMuted}>{`$${orOk?.usedUsd.toFixed(2)} / $${orOk?.limitUsd.toFixed(2)}`}</text>
+        </box>
+      </Show>
+      <box
+        flexDirection="row"
+        gap={1}
+        onMouseOver={() => setHovered("cursor-usage")}
+        onMouseOut={() => setHovered()}
+        onMouseUp={(event) => {
+          if (event.button === 2) {
+            promptCursorToken()
+            return
+          }
+          if (event.button === 0) {
+            if (cursorNeedsToken) promptCursorToken()
+            else setShowCursorRemaining((value) => !value)
+          }
+        }}
+      >
+        <text fg={api.theme.current.text}>
+          {showCursorRemaining() && !cursorNeedsToken ? "Cursor remaining:" : "Cursor:"}
+        </text>
+        <text fg={api.theme.current.textMuted}>
+          {cursorNeedsToken ? "sign in" : cursorValue}
+        </text>
+      </box>
+      <box flexDirection="row" gap={1}>
+        <text fg={api.theme.current.textMuted}>resets on</text>
+        <text fg={api.theme.current.textMuted}>
+          {cursorOk?.resetAt || (cursorNeedsToken ? "Cursor auth required" : "unavailable")}
+        </text>
+      </box>
+      <Show when={!cursorSnapshot.ok && cursorSnapshot.reason === "reauthenticate"}>
+        <box flexDirection="row" gap={1}>
+          <text fg={api.theme.current.textMuted}>click Cursor: to paste a new cookie</text>
+        </box>
+      </Show>
     </>
   }
   const toggleDirectory = (relativePath: string) => {
@@ -516,42 +634,177 @@ const tui: TuiPlugin = async (api, options) => {
     },
     onCancel: () => api.ui.dialog.clear(),
   }))
-  const selectRoot = () => {
-    const sections = rootSections(rootState.customRoots, [...rootPins])
-    const options = [
-      { title: "Add custom dir...", value: ADD_ROOT },
-      { title: "Recent", value: RECENT_ROOTS },
-      ...sections.recentRoots.map((customRoot) => ({
-        title: customRoot,
-        value: customRoot,
-        category: "Recent",
-        footer: rootPins.has(customRoot) ? "* pinned" : "pin",
-      })),
-      { title: "Favorite", value: FAVORITE_ROOTS },
-      ...sections.favoriteRoots.map((customRoot) => ({
-        title: customRoot,
-        value: customRoot,
-        category: "Favorite",
-        footer: "* pinned",
-      })),
-      { title: "Reset to project root", value: RESET_ROOT },
+  let rootPickerSearchAbort: AbortController | undefined
+  let rootPickerDebounce: ReturnType<typeof setTimeout> | undefined
+  let rootPickerSearchGeneration = 0
+  let pickerInterceptor: (() => void) | undefined
+  let selectedRootPickerValue: string | undefined
+  const [rootPickerOptions, setRootPickerOptions] = createSignal<Array<{ title: string; value: string; category?: string; footer?: string; disabled?: boolean; onSelect?: () => void }>>([])
+  let liveRootPickerOptions: Array<{ title: string; value: string; category?: string; footer?: string; disabled?: boolean; onSelect?: () => void }> = []
+
+  const rootDirectoryOptions = (directories: readonly string[], category: string) => {
+    const options: Array<{ title: string; value: string; category: string; onSelect?: () => void }> = []
+    for (const directory of directories) {
+      options.push({
+        title: displayPath(directory, os.homedir()),
+        value: directory,
+        category,
+        onSelect: () => {
+          setRoot(directory)
+          api.ui.dialog.clear()
+        },
+      })
+    }
+    return options
+  }
+
+  const buildRootPickerOptions = (groupActions = false) => {
+    const actionCategory = groupActions ? "Actions" : undefined
+    const sections = rootSections(sidebarSettings.recentFileRoots, [...favorites])
+    const projectCanonical = normalizeRootPath(project)
+    const options: Array<{ title: string; value: string; category?: string; footer?: string; disabled?: boolean; onSelect?: () => void }> = [
+      {
+        title: "Add custom dir...",
+        value: ADD_ROOT,
+        category: actionCategory,
+        onSelect: () => promptForRoot(),
+      },
     ]
+    if (isDirectory(projectCanonical)) {
+      options.push({
+        title: displayPath(projectCanonical, os.homedir()),
+        value: projectCanonical,
+        category: "Project",
+        onSelect: () => {
+          setRoot(projectCanonical)
+          api.ui.dialog.clear()
+        },
+      })
+    }
+    options.push(...rootDirectoryOptions(sections.favoriteRoots, "Favorite"))
+    options.push(...rootDirectoryOptions(sections.recentRoots, "Recent"))
+    options.push({
+      title: "Reset to project root",
+      value: RESET_ROOT,
+      category: actionCategory,
+      onSelect: () => {
+        setRoot(project)
+        api.ui.dialog.clear()
+      },
+    })
+    options.push({
+      title: "Favorite",
+      value: FAVORITE_HELP,
+      category: "Help",
+      footer: "ctrl+f",
+      onSelect: () => {},
+    })
+    return options
+  }
+
+  const handleRootPickerSelect = (value: string) => {
+    if (value === ADD_ROOT) {
+      promptForRoot()
+      return
+    }
+    if (value === RESET_ROOT) {
+      setRoot(project)
+      api.ui.dialog.clear()
+      return
+    }
+    if (value.startsWith(FILE_ROOT_PREFIX)) {
+      insertPath(sessionID, value.slice(FILE_ROOT_PREFIX.length))
+      api.ui.dialog.clear()
+      return
+    }
+    setRoot(value)
+    api.ui.dialog.clear()
+  }
+
+  const applyRootPickerOptions = (searchOptions: Array<{ title: string; value: string; category?: string; footer?: string; disabled?: boolean; onSelect?: () => void }> = []) => {
+    const searching = searchOptions.length > 0
+    const next = searching ? [...searchOptions, ...buildRootPickerOptions(true)] : buildRootPickerOptions()
+    liveRootPickerOptions.splice(0, liveRootPickerOptions.length, ...next)
+    setRootPickerOptions(liveRootPickerOptions.slice())
+    return liveRootPickerOptions
+  }
+
+  const renderRootPicker = (query = "", searchOptions: Array<{ title: string; value: string; category?: string; footer?: string; disabled?: boolean; onSelect?: () => void }> = []) => {
+    const options = applyRootPickerOptions(searchOptions)
+    selectedRootPickerValue = options.find((option) => typeof option.value === "string" && isDirectory(option.value))?.value
+    pickerInterceptor?.()
+    pickerInterceptor = api.keymap.intercept("key", (context) => {
+      if (context.event.ctrl && context.event.name.toLowerCase() === "f" && selectedRootPickerValue && isDirectory(selectedRootPickerValue)) {
+        context.consume({ preventDefault: true, stopPropagation: true })
+        toggleFavorite(selectedRootPickerValue)
+        renderRootPicker(query, searchOptions)
+      }
+    })
     const dialogProps = {
       title: `Project: ${project}`,
       skipFilter: true,
-      options,
-      current: ADD_ROOT,
-      onSelect: (option: (typeof options)[number]) => {
-        if (option.value === ADD_ROOT) promptForRoot()
-        else if (option.value !== RECENT_ROOTS && option.value !== FAVORITE_ROOTS) {
-          setRoot(option.value === RESET_ROOT ? project : option.value)
-          api.ui.dialog.clear()
-        }
+      get options() {
+        rootPickerOptions()
+        return liveRootPickerOptions
       },
-    // OpenCode supports renderFilter at runtime; the installed plugin types lag behind it.
+      onFilter: (filterQuery: string) => {
+        if (rootPickerDebounce) clearTimeout(rootPickerDebounce)
+        rootPickerDebounce = setTimeout(() => {
+          void (async () => {
+            const generation = ++rootPickerSearchGeneration
+            const trimmed = filterQuery.trim()
+            if (!trimmed) {
+              applyRootPickerOptions([])
+              return
+            }
+            rootPickerSearchAbort?.abort()
+            rootPickerSearchAbort = new AbortController()
+            const searchRoots = dedupeRootPaths([project, ...sidebarSettings.recentFileRoots, ...favorites])
+            const result = await runEverythingSearch({
+              query: trimmed,
+              roots: searchRoots,
+              signal: rootPickerSearchAbort.signal,
+            })
+            if (generation !== rootPickerSearchGeneration) return
+            if (result.ok === false) {
+              if (result.error === "aborted") return
+              if (result.error === "missing-es") {
+                api.ui.toast({ variant: "error", message: "Install es.exe and add it to PATH for file search." })
+              } else if (result.error === "ipc-unavailable") {
+                api.ui.toast({ variant: "error", message: "Everything search needs es.exe on PATH and the Everything app running." })
+              }
+              applyRootPickerOptions([])
+              return
+            }
+            applyRootPickerOptions(result.entries.map((entry) => ({
+              title: entry.directory ? `${displayPath(entry.path, os.homedir())}/` : displayPath(entry.path, os.homedir()),
+              value: entry.directory ? entry.path : `${FILE_ROOT_PREFIX}${entry.path}`,
+              onSelect: () => handleRootPickerSelect(entry.directory ? entry.path : `${FILE_ROOT_PREFIX}${entry.path}`),
+            })))
+          })()
+        }, 150)
+      },
+      onMove: (option: (typeof options)[number]) => {
+        if (option.value === FAVORITE_HELP) {
+          queueMicrotask(() => renderRootPicker(query, searchOptions))
+          return
+        }
+        selectedRootPickerValue = typeof option.value === "string" && isDirectory(option.value) ? option.value : undefined
+      },
+      onSelect: (option: (typeof options)[number]) => {
+        pickerInterceptor?.()
+        pickerInterceptor = undefined
+        if (typeof option.onSelect === "function") {
+          option.onSelect()
+          return
+        }
+        handleRootPickerSelect(String(option.value))
+      },
     } as unknown as TuiDialogSelectProps<string>
     api.ui.dialog.replace(() => api.ui.DialogSelect(dialogProps))
   }
+
+  const selectRoot = () => renderRootPicker()
   const openRootPicker = () => setTimeout(selectRoot, 100)
 
   const saveScriptSettings = (next: ScriptSettings, message = "Script settings updated") => {
@@ -786,7 +1039,7 @@ const tui: TuiPlugin = async (api, options) => {
 
   const disposers: Array<() => void> = []
   const registerCommands = () => {
-    const rootCommands = rootSections(rootState.customRoots, [...rootPins])
+    const rootCommands = rootSections(sidebarSettings.recentFileRoots, [...favorites])
     const commands = [
       {
         name: "sidebar.refresh",
@@ -824,18 +1077,18 @@ const tui: TuiPlugin = async (api, options) => {
         run: () => setRoot(project),
       },
       ...rootCommands.favoriteRoots.map((customRoot) => ({
-        name: commandId("file-root-pin", customRoot),
-        title: `Unpin file root: ${customRoot}`,
+        name: commandId("file-root-favorite", customRoot),
+        title: `Unfavorite file root: ${customRoot}`,
         category: "Project files",
         namespace: "sidebar",
-        run: () => toggleRootPin(customRoot),
+        run: () => toggleFavorite(customRoot),
       })),
       ...rootCommands.recentRoots.map((customRoot) => ({
-        name: commandId("file-root-pin", customRoot),
-        title: `Pin file root: ${customRoot}`,
+        name: commandId("file-root-favorite", customRoot),
+        title: `Favorite file root: ${customRoot}`,
         category: "Project files",
         namespace: "sidebar",
-        run: () => toggleRootPin(customRoot),
+        run: () => toggleFavorite(customRoot),
       })),
       ...scripts().flatMap((script) => [
         {
@@ -1129,3 +1382,4 @@ const plugin: TuiPluginModule & { id: string } = {
 }
 
 export default plugin
+

@@ -4,6 +4,8 @@ import path from "node:path"
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 const GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/key"
+const CURSOR_USAGE_URL = "https://cursor.com/api/usage-summary"
 const REQUEST_TIMEOUT_MS = 15_000
 
 export type UsageWindow = {
@@ -37,8 +39,28 @@ export type OpenCodeGoUsage = {
   ok: false
 }
 
+export type OpenRouterUsage = {
+  ok: true
+  usedPercent: number
+  remainingPercent: number
+  usedUsd: number
+  limitUsd: number
+} | {
+  ok: false
+}
+
+export type CursorUsage = {
+  ok: true
+  monthly: UsageWindow
+} | {
+  ok: false
+  reason?: "need-token" | "reauthenticate"
+}
+
 type UsageOptions = {
   authPath?: string
+  cursorSessionToken?: string
+  cursorDbPath?: string
   env?: NodeJS.ProcessEnv
   homeDir?: string
   fetchImpl?: typeof fetch
@@ -110,6 +132,10 @@ function errorResult(): OpenAIUsage {
 }
 
 function goErrorResult(): OpenCodeGoUsage {
+  return { ok: false }
+}
+
+function openRouterErrorResult(): OpenRouterUsage {
   return { ok: false }
 }
 
@@ -210,3 +236,147 @@ export async function probeOpenCodeGoUsage(options: UsageOptions = {}): Promise<
     return goErrorResult()
   }
 }
+
+function parseOpenRouterResponse(value: unknown): OpenRouterUsage {
+  if (!value || typeof value !== "object") return openRouterErrorResult()
+  const data = (value as { data?: { limit?: unknown; limit_remaining?: unknown } }).data
+  if (!data || typeof data !== "object") return openRouterErrorResult()
+  const { limit, limit_remaining } = data
+  if (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0) return openRouterErrorResult()
+  if (typeof limit_remaining !== "number" || !Number.isFinite(limit_remaining)) return openRouterErrorResult()
+  const remaining = Math.max(0, Math.min(limit, limit_remaining))
+  const usedUsd = limit - remaining
+  return {
+    ok: true,
+    usedPercent: Math.round(usedUsd / limit * 100),
+    remainingPercent: Math.round(remaining / limit * 100),
+    usedUsd,
+    limitUsd: limit,
+  }
+}
+
+export async function probeOpenRouterUsage(options: UsageOptions = {}): Promise<OpenRouterUsage> {
+  let key: string | undefined
+  if (typeof options.env?.OPENROUTER_API_KEY === "string" && options.env.OPENROUTER_API_KEY.trim() !== "") {
+    key = options.env.OPENROUTER_API_KEY.trim()
+  } else {
+    try {
+      const raw = await readAuthContent(options)
+      const credential = (JSON.parse(raw) as { openrouter?: { key?: unknown } }).openrouter
+      if (typeof credential?.key === "string" && credential.key.trim() !== "") key = credential.key.trim()
+    } catch {
+      key = undefined
+    }
+  }
+  if (!key) return openRouterErrorResult()
+
+  try {
+    return parseOpenRouterResponse(await fetchUsageResponse(options, OPENROUTER_URL, { Authorization: `Bearer ${key}`, accept: "application/json" }))
+  } catch {
+    return openRouterErrorResult()
+  }
+}
+
+export function cursorDbPath({
+  platform = process.platform,
+  env = process.env,
+  homeDir = os.homedir(),
+}: {
+  platform?: NodeJS.Platform
+  env?: NodeJS.ProcessEnv
+  homeDir?: string
+} = {}): string {
+  const database = path.join("User", "globalStorage", "state.vscdb")
+  if (platform === "win32") return path.join(env.APPDATA ?? path.join(homeDir, "AppData", "Roaming"), "Cursor", database)
+  if (platform === "darwin") return path.join(homeDir, "Library", "Application Support", "Cursor", database)
+  return path.join(env.XDG_CONFIG_HOME ?? path.join(homeDir, ".config"), "Cursor", database)
+}
+
+async function readCursorAccessToken(dbPath: string): Promise<string | undefined> {
+  try {
+    const sqlite = await import("node:sqlite")
+    const db = new sqlite.DatabaseSync(dbPath, { readOnly: true })
+    try {
+      const row = db.prepare("SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'").get() as { value?: unknown } | undefined
+      const value = row?.value
+      if (typeof value === "string") return value
+      if (value instanceof Uint8Array) return Buffer.from(value).toString("utf8")
+      return undefined
+    } finally {
+      db.close()
+    }
+  } catch {
+    return undefined
+  }
+}
+
+export function cursorSessionCookie(value: string): string | undefined {
+  const token = value.trim()
+  if (!token) return undefined
+  const decoded = token.includes("%3A%3A") ? token.replaceAll("%3A%3A", "::") : token
+  const separator = decoded.indexOf("::")
+  const jwt = separator === -1 ? decoded : decoded.slice(separator + 2)
+  const parts = jwt.split(".")
+  if (parts.length !== 3) return undefined
+  const payload = parts[1].replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(parts[1].length / 4) * 4, "=")
+  let sub: unknown
+  try {
+    sub = (JSON.parse(Buffer.from(payload, "base64").toString("utf8")) as { sub?: unknown }).sub
+  } catch {
+    return undefined
+  }
+  if (typeof sub !== "string" || sub.trim() === "") return undefined
+  return `${encodeURIComponent(sub)}%3A%3A${jwt}`
+}
+
+function parseCursorUsageResponse(value: unknown, nowMs: number): CursorUsage {
+  if (!value || typeof value !== "object") return { ok: false }
+  const body = value as { billingCycleEnd?: unknown; billingCycleStart?: unknown; isUnlimited?: unknown; individualUsage?: unknown }
+  const resetAt = [body.billingCycleEnd, body.billingCycleStart]
+    .filter((item): item is string => typeof item === "string")
+    .map((iso) => new Date(iso))
+    .find((date) => !Number.isNaN(date.valueOf()))
+  if (!resetAt) return { ok: false }
+  const plan = body.individualUsage && typeof body.individualUsage === "object"
+    ? (body.individualUsage as { plan?: unknown }).plan
+    : undefined
+  if (!plan || typeof plan !== "object") return { ok: false }
+  const window = plan as { used?: unknown; limit?: unknown; autoPercentUsed?: unknown; totalPercentUsed?: unknown }
+  const usedPercent = body.isUnlimited === true
+    ? null
+    : typeof window.autoPercentUsed === "number" && Number.isFinite(window.autoPercentUsed)
+      ? Math.round(Math.max(0, Math.min(100, window.autoPercentUsed)))
+      : typeof window.used === "number" && Number.isFinite(window.used)
+        && typeof window.limit === "number" && Number.isFinite(window.limit) && window.limit > 0
+        ? Math.round(Math.max(0, Math.min(100, window.used / window.limit * 100)))
+        : typeof window.totalPercentUsed === "number" && Number.isFinite(window.totalPercentUsed)
+          ? Math.round(Math.max(0, Math.min(100, window.totalPercentUsed <= 1 ? window.totalPercentUsed * 100 : window.totalPercentUsed)))
+          : null
+  if (usedPercent === null && body.isUnlimited !== true) return { ok: false }
+  return {
+    ok: true,
+    monthly: {
+      usedPercent,
+      resetAt: resetAt.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }),
+      minutes: null,
+    },
+  }
+}
+
+export async function probeCursorUsage(options: UsageOptions = {}): Promise<CursorUsage> {
+  let token = await readCursorAccessToken(options.cursorDbPath ?? cursorDbPath({ env: options.env, homeDir: options.homeDir }))
+  if (!token) token = options.cursorSessionToken?.trim()
+  if (!token) return { ok: false, reason: "need-token" }
+  const cookie = cursorSessionCookie(token)
+  if (!cookie) return { ok: false, reason: "need-token" }
+
+  try {
+    return parseCursorUsageResponse(await fetchUsageResponse(options, CURSOR_USAGE_URL, { Cookie: `WorkosCursorSessionToken=${cookie}`, accept: "application/json" }), options.nowMs ?? Date.now())
+  } catch (error) {
+    if (error instanceof UsageRequestError && (error.status === 401 || error.status === 403)) {
+      return { ok: false, reason: "reauthenticate" }
+    }
+    return { ok: false }
+  }
+}
+

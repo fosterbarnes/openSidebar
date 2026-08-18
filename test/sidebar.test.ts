@@ -1,10 +1,10 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { defaultScriptSettings, displayPath, loadSidebarSettings, MAX_RECENT_ROOTS, normalizeExtension, normalizeSidebarSettings, normalizeScriptSettings, parseLauncher, promptProjectDirectory, readScripts, readTree, rootSections, saveSidebarSettings, sessionProjectDirectory, sidebarConfigPaths } from "../src/helpers.ts"
-import { probeOpenAIUsage, probeOpenCodeGoUsage, resolveAuthPath } from "../src/usage.ts"
+import { defaultScriptSettings, displayPath, everythingSearchArgs, everythingSearchQuery, loadSidebarSettings, MAX_RECENT_ROOTS, normalizeExtension, normalizeRootPath, normalizeSidebarSettings, normalizeScriptSettings, parseLauncher, promptProjectDirectory, readCursorSessionToken, readScripts, readTree, rootPathKey, rootSections, runEverythingSearch, sameRootPath, saveSidebarSettings, sessionProjectDirectory, sidebarConfigPaths, writeCursorSessionToken, clearCursorSessionToken, cursorSessionSecretPath } from "../src/helpers.ts"
+import { cursorSessionCookie, cursorDbPath, probeCursorUsage, probeOpenAIUsage, probeOpenCodeGoUsage, probeOpenRouterUsage, resolveAuthPath } from "../src/usage.ts"
 import { commandArgs, scriptCommand, weztermArgs, weztermSendArgs } from "../src/script-runner.ts"
 
 test("reads sorted package scripts", () => {
@@ -333,6 +333,92 @@ test("filters stale roots and removes duplicate recent entries", () => {
   assert.deepEqual(sections, { recentRoots: ["valid"], favoriteRoots: ["favorite"] })
 })
 
+test("normalizes root paths for identity on Windows-style separators", () => {
+  if (process.platform !== "win32") return
+  const first = "C:\\Work\\repo"
+  const second = "C:/Work/repo"
+  assert.equal(rootPathKey(first), rootPathKey(second))
+  assert.ok(sameRootPath(normalizeRootPath(first), normalizeRootPath(second)))
+})
+
+test("migrates recent file roots from legacy session customRoots", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-recent-"))
+  const custom = path.join(root, "custom")
+  mkdirSync(custom)
+  try {
+    const settings = normalizeSidebarSettings({
+      fileRoots: { session: { customRoots: [custom, custom], activeRoot: custom } },
+    })
+    assert.deepEqual(settings.recentFileRoots, [normalizeRootPath(custom)])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("builds Everything search query scoped to roots", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-es-query-"))
+  const nested = path.join(root, "nested")
+  mkdirSync(nested)
+  try {
+    const query = everythingSearchQuery([root, nested], "readme")
+    assert.match(query, /readme/)
+    assert.doesNotMatch(query, /parent:/)
+    assert.match(query, new RegExp(path.basename(root)))
+    assert.match(query, /\|/)
+    assert.ok(query.includes(`${nested}${path.sep}`))
+    assert.doesNotMatch(query, /"/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("parses Everything search output and reports IPC errors", async () => {
+  const file = path.join(os.tmpdir(), `sidebar-es-${process.pid}.txt`)
+  writeFileSync(file, "sample")
+  try {
+    let capturedArgs: string[] = []
+    const ok = await runEverythingSearch({
+      query: "sample",
+      roots: [os.tmpdir()],
+      spawnImpl: async (_executable, args) => {
+        capturedArgs = args
+        return { stdout: `${file}\n`, code: 0 }
+      },
+    })
+    assert.equal(ok.ok, true)
+    if (ok.ok) {
+      assert.equal(ok.entries.length, 1)
+      assert.equal(ok.entries[0]?.directory, false)
+    }
+    assert.equal(capturedArgs.at(-2), "-search")
+    assert.match(capturedArgs.at(-1) ?? "", /sample/)
+    const ipc = await runEverythingSearch({
+      query: "x",
+      roots: [os.tmpdir()],
+      spawnImpl: async () => ({ stdout: "", code: 8 }),
+    })
+    assert.deepEqual(ipc, { ok: false, error: "ipc-unavailable" })
+    const missing = await runEverythingSearch({
+      query: "x",
+      roots: [os.tmpdir()],
+      spawnImpl: async () => ({ stdout: "", code: null, error: Object.assign(new Error("missing"), { code: "ENOENT" }) }),
+    })
+    assert.deepEqual(missing, { ok: false, error: "missing-es" })
+    const aborted = new AbortController()
+    aborted.abort()
+    const cancelled = await runEverythingSearch({
+      query: "x",
+      roots: [os.tmpdir()],
+      signal: aborted.signal,
+      spawnImpl: async () => ({ stdout: "", code: 1 }),
+    })
+    assert.deepEqual(cancelled, { ok: false, error: "aborted" })
+  } finally {
+    rmSync(file, { force: true })
+  }
+  assert.deepEqual(everythingSearchArgs("test query"), ["-n", "80", "-timeout", "2000", "-hide-empty-search-results", "-search", "test query"])
+})
+
 test("returns a neutral state for failed OpenAI usage requests", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-usage-"))
   try {
@@ -388,6 +474,74 @@ test("returns a neutral state for failed OpenCode Go usage requests", async () =
       fetchImpl: async () => new Response("", { status: 503 }),
     })
     assert.deepEqual(result, { ok: false })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("parses OpenRouter key usage against its credit limit", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-or-usage-"))
+  try {
+    const authPath = path.join(root, "auth.json")
+    writeFileSync(authPath, JSON.stringify({ openrouter: { type: "api", key: "secret" } }))
+    let requestUrl = ""
+    let authorization = ""
+    const result = await probeOpenRouterUsage({
+      authPath,
+      fetchImpl: async (url, init) => {
+        requestUrl = String(url)
+        authorization = String(new Headers(init?.headers).get("authorization"))
+        return new Response(JSON.stringify({ data: { limit: 5, limit_remaining: 2.9 } }), { status: 200 })
+      },
+    })
+    assert.equal(result.ok, true)
+    assert.equal(requestUrl, "https://openrouter.ai/api/v1/key")
+    assert.equal(authorization, "Bearer secret")
+    if (result.ok) {
+      assert.equal(result.usedPercent, 42)
+      assert.equal(result.remainingPercent, 58)
+      assert.equal(result.usedUsd, 2.1)
+      assert.equal(result.limitUsd, 5)
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("falls back to the OPENROUTER_API_KEY environment variable", async () => {
+  let authorization = ""
+  const result = await probeOpenRouterUsage({
+    authPath: path.join(os.tmpdir(), "missing-openrouter-auth.json"),
+    env: { OPENROUTER_API_KEY: "env-secret" },
+    fetchImpl: async (url, init) => {
+      authorization = String(new Headers(init?.headers).get("authorization"))
+      return new Response(JSON.stringify({ data: { limit: 5, limit_remaining: 5 } }), { status: 200 })
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(authorization, "Bearer env-secret")
+})
+
+test("returns a neutral state for failed OpenRouter usage requests", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-or-usage-"))
+  try {
+    const authPath = path.join(root, "auth.json")
+    writeFileSync(authPath, JSON.stringify({ openrouter: { type: "api", key: "secret" } }))
+    const failed = await probeOpenRouterUsage({
+      authPath,
+      fetchImpl: async () => new Response("", { status: 503 }),
+    })
+    assert.deepEqual(failed, { ok: false })
+    const noLimit = await probeOpenRouterUsage({
+      authPath,
+      fetchImpl: async () => new Response(JSON.stringify({ data: { limit: null, limit_remaining: 2.9 } }), { status: 200 }),
+    })
+    assert.deepEqual(noLimit, { ok: false })
+    const noRemaining = await probeOpenRouterUsage({
+      authPath,
+      fetchImpl: async () => new Response(JSON.stringify({ data: { limit: 5 } }), { status: 200 }),
+    })
+    assert.deepEqual(noRemaining, { ok: false })
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -469,12 +623,24 @@ test("normalizes persisted pins and session roots", () => {
   try {
     const settings = normalizeSidebarSettings({
       scriptPins: ["build", "build", 4],
-      fileRootPins: [custom, "missing"],
+      favoriteFileRoots: [custom, "missing"],
       fileRoots: { session: { customRoots: [custom, custom], activeRoot: custom } },
     })
     assert.deepEqual(settings.scriptPins, ["build"])
-    assert.deepEqual(settings.fileRootPins, [custom])
+    assert.deepEqual(settings.favoriteFileRoots, [custom])
     assert.deepEqual(settings.fileRoots.session, { customRoots: [custom], activeRoot: custom })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("migrates legacy file root pins to favorite file roots", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-favorites-"))
+  const custom = path.join(root, "custom")
+  mkdirSync(custom)
+  try {
+    const settings = normalizeSidebarSettings({ fileRootPins: [custom] })
+    assert.deepEqual(settings.favoriteFileRoots, [custom])
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -492,3 +658,238 @@ test("writes complete sidebar settings as JSON", () => {
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+function fakeCursorJwt(sub: string): string {
+  const encode = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url")
+  return `${encode({ alg: "none", typ: "JWT" })}.${encode({ sub, aud: "https://cursor.com", type: "session" })}.signature`
+}
+
+function cursorSummaryResponse(overrides: Record<string, unknown> = {}): Response {
+  return new Response(JSON.stringify({
+    billingCycleStart: "2026-08-18T04:42:35.000Z",
+    billingCycleEnd: "2026-09-18T04:42:35.000Z",
+    membershipType: "pro",
+    isUnlimited: false,
+    individualUsage: { plan: { used: 28, limit: 2000, remaining: 1972, totalPercentUsed: 0.0566 } },
+    ...overrides,
+  }), { status: 200 })
+}
+
+test("parses Cursor monthly usage with a pasted session cookie", async () => {
+  const jwt = fakeCursorJwt("auth0|user_test")
+  const missingDb = path.join(os.tmpdir(), "sidebar-cursor-missing-db", "state.vscdb")
+  let requestUrl = ""
+  let cookie = ""
+  const result = await probeCursorUsage({
+    cursorDbPath: missingDb,
+    cursorSessionToken: `auth0|user_test::${jwt}`,
+    fetchImpl: async (url, init) => {
+      requestUrl = String(url)
+      cookie = String(new Headers(init?.headers).get("cookie"))
+      return cursorSummaryResponse()
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(requestUrl, "https://cursor.com/api/usage-summary")
+  assert.equal(cookie, `WorkosCursorSessionToken=auth0%7Cuser_test%3A%3A${jwt}`)
+  if (result.ok) {
+    assert.equal(result.monthly.usedPercent, 1)
+    assert.match(result.monthly.resetAt ?? "", /2026/)
+  }
+})
+
+test("uses Cursor autoPercentUsed when used over limit would disagree", async () => {
+  const jwt = fakeCursorJwt("auth0|user_test")
+  const result = await probeCursorUsage({
+    cursorDbPath: path.join(os.tmpdir(), "sidebar-cursor-missing-db", "state.vscdb"),
+    cursorSessionToken: `auth0|user_test::${jwt}`,
+    fetchImpl: async () => cursorSummaryResponse({
+      individualUsage: {
+        plan: {
+          used: 467,
+          limit: 2000,
+          remaining: 1533,
+          autoPercentUsed: 1.0377777777777777,
+          apiPercentUsed: 0,
+          totalPercentUsed: 0.9434343434343434,
+        },
+      },
+    }),
+  })
+  assert.equal(result.ok, true)
+  if (result.ok) assert.equal(result.monthly.usedPercent, 1)
+})
+
+test("builds a session cookie from a bare Cursor JWT", () => {
+  const jwt = fakeCursorJwt("auth0|user_test")
+  assert.equal(cursorSessionCookie(jwt), `auth0%7Cuser_test%3A%3A${jwt}`)
+  assert.equal(cursorSessionCookie(`auth0|user_test%3A%3A${jwt}`), `auth0%7Cuser_test%3A%3A${jwt}`)
+  assert.equal(cursorSessionCookie("not-a-jwt"), undefined)
+  assert.equal(cursorSessionCookie(""), undefined)
+})
+
+test("auto-reads the Cursor session token from state.vscdb", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-cursor-db-"))
+  try {
+    let sqlite: typeof import("node:sqlite")
+    try {
+      sqlite = await import("node:sqlite")
+    } catch {
+      t.skip("node:sqlite unavailable")
+      return
+    }
+    const dbPath = path.join(root, "state.vscdb")
+    const jwt = fakeCursorJwt("auth0|user_db")
+    const db = new sqlite.DatabaseSync(dbPath)
+    db.exec("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)")
+    db.prepare("INSERT INTO ItemTable (key, value) VALUES (?, ?)").run("cursorAuth/accessToken", jwt)
+    db.close()
+    let cookie = ""
+    const result = await probeCursorUsage({
+      cursorDbPath: dbPath,
+      fetchImpl: async (url, init) => {
+        cookie = String(new Headers(init?.headers).get("cookie"))
+        return cursorSummaryResponse()
+      },
+    })
+    assert.equal(result.ok, true)
+    assert.equal(cookie, `WorkosCursorSessionToken=auth0%7Cuser_db%3A%3A${jwt}`)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("prefers the Cursor app database over a pasted session token", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-cursor-db-first-"))
+  try {
+    let sqlite: typeof import("node:sqlite")
+    try {
+      sqlite = await import("node:sqlite")
+    } catch {
+      t.skip("node:sqlite unavailable")
+      return
+    }
+    const dbPath = path.join(root, "state.vscdb")
+    const dbJwt = fakeCursorJwt("auth0|user_db")
+    const pasteJwt = fakeCursorJwt("auth0|user_paste")
+    const db = new sqlite.DatabaseSync(dbPath)
+    db.exec("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)")
+    db.prepare("INSERT INTO ItemTable (key, value) VALUES (?, ?)").run("cursorAuth/accessToken", dbJwt)
+    db.close()
+    let cookie = ""
+    const result = await probeCursorUsage({
+      cursorDbPath: dbPath,
+      cursorSessionToken: `auth0|user_paste::${pasteJwt}`,
+      fetchImpl: async (_url, init) => {
+        cookie = String(new Headers(init?.headers).get("cookie"))
+        return cursorSummaryResponse()
+      },
+    })
+    assert.equal(result.ok, true)
+    assert.equal(cookie, `WorkosCursorSessionToken=auth0%7Cuser_db%3A%3A${dbJwt}`)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("resolves the Cursor state database path per platform", () => {
+  assert.equal(cursorDbPath({ platform: "win32", env: { APPDATA: "C:\\Users\\test\\AppData\\Roaming" }, homeDir: "C:\\Users\\test" }), path.join("C:\\Users\\test\\AppData\\Roaming", "Cursor", "User", "globalStorage", "state.vscdb"))
+  assert.equal(cursorDbPath({ platform: "darwin", env: {}, homeDir: "/Users/test" }), path.join("/Users/test", "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb"))
+  assert.equal(cursorDbPath({ platform: "linux", env: { XDG_CONFIG_HOME: "/tmp/config" }, homeDir: "/home/test" }), path.join("/tmp/config", "Cursor", "User", "globalStorage", "state.vscdb"))
+})
+
+test("requests a Cursor session token when none is available", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-cursor-missing-"))
+  try {
+    const result = await probeCursorUsage({
+      cursorDbPath: path.join(root, "missing", "state.vscdb"),
+      fetchImpl: async () => { throw new Error("should not be called") },
+    })
+    assert.deepEqual(result, { ok: false, reason: "need-token" })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("requires a fresh Cursor session token for unauthorized requests", async () => {
+  const jwt = fakeCursorJwt("auth0|user_test")
+  const result = await probeCursorUsage({
+    cursorDbPath: path.join(os.tmpdir(), "sidebar-cursor-missing-db", "state.vscdb"),
+    cursorSessionToken: `auth0|user_test::${jwt}`,
+    fetchImpl: async () => new Response("", { status: 401 }),
+  })
+  assert.deepEqual(result, { ok: false, reason: "reauthenticate" })
+})
+
+test("returns a neutral state for failed Cursor usage requests", async () => {
+  const jwt = fakeCursorJwt("auth0|user_test")
+  const missingDb = path.join(os.tmpdir(), "sidebar-cursor-missing-db", "state.vscdb")
+  const failed = await probeCursorUsage({
+    cursorDbPath: missingDb,
+    cursorSessionToken: `auth0|user_test::${jwt}`,
+    fetchImpl: async () => new Response("", { status: 503 }),
+  })
+  assert.deepEqual(failed, { ok: false })
+  const malformed = await probeCursorUsage({
+    cursorDbPath: missingDb,
+    cursorSessionToken: `auth0|user_test::${jwt}`,
+    fetchImpl: async () => new Response(JSON.stringify({ billingCycleEnd: "2026-09-18T04:42:35.000Z" }), { status: 200 }),
+  })
+  assert.deepEqual(malformed, { ok: false })
+})
+
+test("shows an unlimited Cursor plan with its reset date", async () => {
+  const jwt = fakeCursorJwt("auth0|user_test")
+  const result = await probeCursorUsage({
+    cursorDbPath: path.join(os.tmpdir(), "sidebar-cursor-missing-db", "state.vscdb"),
+    cursorSessionToken: `auth0|user_test::${jwt}`,
+    fetchImpl: async () => cursorSummaryResponse({ isUnlimited: true }),
+  })
+  assert.equal(result.ok, true)
+  if (result.ok) {
+    assert.equal(result.monthly.usedPercent, null)
+    assert.match(result.monthly.resetAt ?? "", /2026/)
+  }
+})
+
+test("persists a Cursor session token without disturbing other settings", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-cursor-config-"))
+  try {
+    const configPath = path.join(root, ".config", "openSidebar", "config.json")
+    const secretPath = cursorSessionSecretPath(root)
+    assert.equal(readCursorSessionToken(root), undefined)
+    mkdirSync(path.dirname(configPath), { recursive: true })
+    writeFileSync(configPath, JSON.stringify({ showMcp: false, visibility: { showMcp: false } }))
+    writeCursorSessionToken(root, "  auth0|user_test::eyJ.eyJ.x  ")
+    const settings = JSON.parse(readFileSync(configPath, "utf8"))
+    assert.equal(settings.showMcp, false)
+    assert.equal(settings.cursorSessionToken, undefined)
+    assert.equal(readFileSync(secretPath, "utf8").trim(), "auth0|user_test::eyJ.eyJ.x")
+    assert.equal(readCursorSessionToken(root), "auth0|user_test::eyJ.eyJ.x")
+    writeCursorSessionToken(root, "next-token")
+    assert.equal(readCursorSessionToken(root), "next-token")
+    assert.equal(JSON.parse(readFileSync(configPath, "utf8")).cursorSessionToken, undefined)
+    clearCursorSessionToken(root)
+    assert.equal(readCursorSessionToken(root), undefined)
+    assert.equal(existsSync(secretPath), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("moves a Cursor session token out of config.json into the secrets file", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-cursor-migrate-"))
+  try {
+    const configPath = path.join(root, ".config", "openSidebar", "config.json")
+    mkdirSync(path.dirname(configPath), { recursive: true })
+    writeFileSync(configPath, JSON.stringify({ showMcp: false, cursorSessionToken: "legacy-token" }))
+    assert.equal(readCursorSessionToken(root), "legacy-token")
+    const settings = JSON.parse(readFileSync(configPath, "utf8"))
+    assert.equal(settings.showMcp, false)
+    assert.equal(settings.cursorSessionToken, undefined)
+    assert.equal(readFileSync(cursorSessionSecretPath(root), "utf8").trim(), "legacy-token")
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+

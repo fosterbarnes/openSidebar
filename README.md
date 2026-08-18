@@ -23,6 +23,12 @@ toggle through weight options
 
 see your weekly usage and when it resets. not all platforms are currently supported
 
+**Cursor usage**
+
+If Cursor is installed and you are signed in on this machine, the Cursor row fills in by itself.
+If it shows `sign in`, click it and follow the numbered steps.
+The cookie is a login secret: it is stored only in `~/.config/openSidebar/cursor-session` (created automatically when you paste), not in project config, and never committed.
+
 
 ### Main sidebar menu
 
@@ -35,7 +41,7 @@ Built with wezterm, pwsh and Windows in mind first, so un-tested issues may come
 
 **`Files`**
 
-Browse/copy files in-terminal. Click to change dir.
+Browse/copy files in-terminal. Click the label or `[project]` to open the file-root picker: switch the tree root, favorite the highlighted directory with Ctrl+F, and pick recent dirs. Recents and favorites are stored in the project `.config/openSidebar.json` (shared across sessions). Type in the picker to search file and folder names under the project, your recents, and your favorites using [Everything](https://www.voidtools.com/) (`es.exe` on PATH, with the Everything app running). Matches appear directly under the search box; clearing the box restores the usual project, favorite, and recent rows.
 
 When launched with `oc <directory>`, a fresh session uses the project name. The
 first duplicate gets a numeric suffix such as `openSidebar1`, followed by
@@ -60,7 +66,7 @@ values missing from the project file continue to come from the user config. Use
 `config.example.json` as a reference for the currently configurable settings.
 `projectDirectory` sets the directory used by Files and Scripts independently of the
 OpenCode session directory. Script pins, file-root history, favorite roots,
-and per-session active roots are also stored there. OpenCode-owned settings such as
+recent file roots, and per-session active roots are also stored there. OpenCode-owned settings such as
 sessions, models, MCP services, LSP services, and authentication remain in OpenCode.
 The initial `cd <directory>` prompt may be quoted by the terminal; openSidebar accepts
 that form when locating the project's config.

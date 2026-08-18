@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -43,7 +44,8 @@ export type SidebarSettings = {
   }
   scripts: ScriptSettings
   scriptPins: string[]
-  fileRootPins: string[]
+  favoriteFileRoots: string[]
+  recentFileRoots: string[]
   fileRoots: Record<string, { customRoots: string[]; activeRoot?: string }>
 }
 
@@ -158,7 +160,8 @@ export function defaultSidebarSettings(): SidebarSettings {
     visibility: { showMcp: true, showLsp: true },
     scripts: defaultScriptSettings(),
     scriptPins: [],
-    fileRootPins: [],
+    favoriteFileRoots: [],
+    recentFileRoots: [],
     fileRoots: {},
   }
 }
@@ -200,24 +203,54 @@ export function normalizeSidebarSettings(value: unknown, base = defaultSidebarSe
     visibility: { ...base.visibility },
     scripts: cloneSettings(base.scripts),
     scriptPins: [...base.scriptPins],
-    fileRootPins: [...base.fileRootPins],
+    favoriteFileRoots: [...base.favoriteFileRoots],
+    recentFileRoots: [...base.recentFileRoots],
     fileRoots: structuredClone(base.fileRoots),
   }
-  const input = value as { projectDirectory?: unknown; showMcp?: unknown; showLsp?: unknown; scripts?: unknown; scriptPins?: unknown; fileRootPins?: unknown; fileRoots?: unknown }
+  const input = value as {
+    projectDirectory?: unknown
+    showMcp?: unknown
+    showLsp?: unknown
+    scripts?: unknown
+    scriptPins?: unknown
+    favoriteFileRoots?: unknown
+    fileRootPins?: unknown
+    recentFileRoots?: unknown
+    fileRoots?: unknown
+  }
   const fileRoots: SidebarSettings["fileRoots"] = { ...base.fileRoots }
+  const migratedRecentRoots: string[] = []
   if (input.fileRoots && typeof input.fileRoots === "object") {
     for (const [sessionID, rawState] of Object.entries(input.fileRoots)) {
       if (!rawState || typeof rawState !== "object") continue
       const state = rawState as { customRoots?: unknown; activeRoot?: unknown }
-      const customRoots = Array.isArray(state.customRoots)
-        ? [...new Set(state.customRoots.filter((item): item is string => typeof item === "string" && isDirectory(item)))]
-        : []
+      const customRoots = dedupeRootPaths(
+        Array.isArray(state.customRoots)
+          ? state.customRoots.filter((item): item is string => typeof item === "string")
+          : [],
+      )
+      migratedRecentRoots.push(...customRoots)
+      const activeRoot = typeof state.activeRoot === "string"
+        ? normalizeRootPath(state.activeRoot)
+        : undefined
       fileRoots[sessionID] = {
         customRoots,
-        activeRoot: typeof state.activeRoot === "string" && customRoots.includes(state.activeRoot) ? state.activeRoot : undefined,
+        activeRoot: activeRoot && isDirectory(activeRoot) ? activeRoot : undefined,
       }
     }
   }
+  let recentFileRoots = Array.isArray(input.recentFileRoots)
+    ? dedupeRootPaths(input.recentFileRoots.filter((item): item is string => typeof item === "string"))
+    : [...base.recentFileRoots]
+  if (recentFileRoots.length === 0 && migratedRecentRoots.length > 0) {
+    recentFileRoots = dedupeRootPaths(migratedRecentRoots)
+  }
+  const rawFavorites = Array.isArray(input.favoriteFileRoots)
+    ? input.favoriteFileRoots
+    : input.fileRootPins
+  const normalizedFavorites = Array.isArray(rawFavorites)
+    ? dedupeRootPaths(rawFavorites.filter((item): item is string => typeof item === "string"))
+    : dedupeRootPaths(base.favoriteFileRoots)
   return {
     projectDirectory: typeof input.projectDirectory === "string" && isDirectory(input.projectDirectory)
       ? input.projectDirectory
@@ -230,9 +263,8 @@ export function normalizeSidebarSettings(value: unknown, base = defaultSidebarSe
     scriptPins: Array.isArray(input.scriptPins)
       ? [...new Set(input.scriptPins.filter((item): item is string => typeof item === "string"))]
       : [...base.scriptPins],
-    fileRootPins: Array.isArray(input.fileRootPins)
-      ? [...new Set(input.fileRootPins.filter((item): item is string => typeof item === "string" && isDirectory(item)))]
-      : [...base.fileRootPins],
+    favoriteFileRoots: normalizedFavorites,
+    recentFileRoots,
     fileRoots,
   }
 }
@@ -302,6 +334,84 @@ export function saveSidebarSettings(filePath: string, settings: SidebarSettings)
   fs.renameSync(temporary, filePath)
 }
 
+function cursorSettingsPath(homeDirectory: string): string {
+  return path.join(homeDirectory, ".config", "openSidebar", "config.json")
+}
+
+export function cursorSessionSecretPath(homeDirectory = os.homedir()): string {
+  return path.join(homeDirectory, ".config", "openSidebar", "cursor-session")
+}
+
+function configCursorSessionToken(homeDirectory: string): string | undefined {
+  const value = readJsonFile(cursorSettingsPath(homeDirectory))
+  if (!value || typeof value !== "object") return undefined
+  const token = (value as { cursorSessionToken?: unknown }).cursorSessionToken
+  return typeof token === "string" && token.trim() !== "" ? token.trim() : undefined
+}
+
+function writeJsonObject(filePath: string, value: Record<string, unknown>): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  const temporary = `${filePath}.tmp-${process.pid}`
+  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8")
+  fs.renameSync(temporary, filePath)
+}
+
+function stripCursorSessionTokenFromConfig(homeDirectory: string): void {
+  const filePath = cursorSettingsPath(homeDirectory)
+  const existing = readJsonFile(filePath)
+  if (!existing || typeof existing !== "object" || !("cursorSessionToken" in existing)) return
+  const settings = { ...(existing as Record<string, unknown>) }
+  delete settings.cursorSessionToken
+  writeJsonObject(filePath, settings)
+}
+
+function readCursorSessionSecret(homeDirectory: string): string | undefined {
+  try {
+    const token = fs.readFileSync(cursorSessionSecretPath(homeDirectory), "utf8").trim()
+    return token !== "" ? token : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function writeCursorSessionSecret(homeDirectory: string, token: string): void {
+  const filePath = cursorSessionSecretPath(homeDirectory)
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  const temporary = `${filePath}.tmp-${process.pid}`
+  fs.writeFileSync(temporary, `${token}\n`, "utf8")
+  fs.renameSync(temporary, filePath)
+  try {
+    fs.chmodSync(filePath, 0o600)
+  } catch {
+    // Owner-only mode is best-effort on Windows.
+  }
+}
+
+function migrateCursorSessionToken(homeDirectory: string): void {
+  const fromConfig = configCursorSessionToken(homeDirectory)
+  if (fromConfig && !readCursorSessionSecret(homeDirectory)) writeCursorSessionSecret(homeDirectory, fromConfig)
+  stripCursorSessionTokenFromConfig(homeDirectory)
+}
+
+export function readCursorSessionToken(homeDirectory = os.homedir()): string | undefined {
+  migrateCursorSessionToken(homeDirectory)
+  return readCursorSessionSecret(homeDirectory) ?? configCursorSessionToken(homeDirectory)
+}
+
+export function writeCursorSessionToken(homeDirectory: string, token: string): void {
+  writeCursorSessionSecret(homeDirectory, token.trim())
+  stripCursorSessionTokenFromConfig(homeDirectory)
+}
+
+export function clearCursorSessionToken(homeDirectory = os.homedir()): void {
+  try {
+    fs.unlinkSync(cursorSessionSecretPath(homeDirectory))
+  } catch {
+    // Missing secrets file is already clear.
+  }
+  stripCursorSessionTokenFromConfig(homeDirectory)
+}
+
 export function parseLauncher(value: string): string[] | undefined {
   const tokens: string[] = []
   let token = ""
@@ -349,6 +459,123 @@ export function isDirectory(value: string): boolean {
   }
 }
 
+export function normalizeRootPath(value: string): string {
+  const normalized = path.normalize(value)
+  if (process.platform === "win32" && /^[a-zA-Z]:/.test(normalized)) {
+    return normalized.slice(0, 1).toUpperCase() + normalized.slice(1)
+  }
+  return normalized
+}
+
+export function rootPathKey(value: string): string {
+  const normalized = normalizeRootPath(value)
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+export function sameRootPath(first: string, second: string): boolean {
+  return rootPathKey(first) === rootPathKey(second)
+}
+
+export function dedupeRootPaths(paths: readonly string[], isValid: (root: string) => boolean = isDirectory): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const item of paths) {
+    if (typeof item !== "string" || !item.trim()) continue
+    const canonical = normalizeRootPath(item)
+    if (!isValid(canonical)) continue
+    const key = rootPathKey(canonical)
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(canonical)
+  }
+  return result
+}
+
+export type EverythingSearchEntry = { path: string; directory: boolean }
+export type EverythingSearchResult =
+  | { ok: true; entries: EverythingSearchEntry[] }
+  | { ok: false; error: "missing-es" | "ipc-unavailable" | "failed" | "aborted" }
+
+export type EverythingSpawnResult = { stdout: string; code: number | null; error?: Error }
+
+export function everythingSearchQuery(roots: readonly string[], query: string): string {
+  const scoped = dedupeRootPaths(roots).map((root) => {
+    const folder = normalizeRootPath(root)
+    const withSep = folder.endsWith(path.sep) ? folder : `${folder}${path.sep}`
+    return /[\s<>|"]/.test(withSep) ? `"${withSep.replaceAll('"', "")}"` : withSep
+  })
+  const scope = scoped.length === 0 ? "" : scoped.length === 1 ? scoped[0] : `<${scoped.join("|")}>`
+  const trimmed = query.trim()
+  if (scope && trimmed) return `${scope} ${trimmed}`
+  return trimmed || scope
+}
+
+export function everythingSearchArgs(search: string, maxResults = 80): string[] {
+  // es.exe matches only when the query is a separate -search argv; wrapping the query in quotes yields zero hits.
+  return ["-n", String(maxResults), "-timeout", "2000", "-hide-empty-search-results", "-search", search]
+}
+
+function defaultEverythingSpawn(executable: string, args: string[], signal?: AbortSignal): Promise<EverythingSpawnResult> {
+  return new Promise((resolve) => {
+    const child = spawn(executable, args, { windowsHide: true })
+    let stdout = ""
+    const onAbort = () => {
+      child.kill()
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
+    child.stdout?.on("data", (chunk) => {
+      stdout += String(chunk)
+    })
+    child.on("error", (error) => {
+      signal?.removeEventListener("abort", onAbort)
+      resolve({ stdout, code: null, error })
+    })
+    child.on("close", (code) => {
+      signal?.removeEventListener("abort", onAbort)
+      resolve({ stdout, code })
+    })
+  })
+}
+
+export async function runEverythingSearch(options: {
+  query: string
+  roots: readonly string[]
+  maxResults?: number
+  signal?: AbortSignal
+  executable?: string
+  spawnImpl?: (executable: string, args: string[], signal?: AbortSignal) => Promise<EverythingSpawnResult>
+}): Promise<EverythingSearchResult> {
+  const executable = options.executable ?? (process.platform === "win32" ? "es.exe" : "es")
+  const spawnImpl = options.spawnImpl ?? defaultEverythingSpawn
+  const search = everythingSearchQuery(options.roots, options.query)
+  const args = everythingSearchArgs(search, options.maxResults)
+  if (options.signal?.aborted) return { ok: false, error: "aborted" }
+  const spawned = await spawnImpl(executable, args, options.signal)
+  if (options.signal?.aborted) return { ok: false, error: "aborted" }
+  if (spawned.error) {
+    const code = (spawned.error as NodeJS.ErrnoException).code
+    if (code === "ENOENT") return { ok: false, error: "missing-es" }
+    return { ok: false, error: "failed" }
+  }
+  if (spawned.code === 8) return { ok: false, error: "ipc-unavailable" }
+  if (spawned.code !== 0 && spawned.code !== 9) return { ok: false, error: "failed" }
+  const entries: EverythingSearchEntry[] = []
+  for (const line of spawned.stdout.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    const canonical = normalizeRootPath(trimmed)
+    let directory = false
+    try {
+      directory = fs.statSync(canonical).isDirectory()
+    } catch {
+      continue
+    }
+    entries.push({ path: canonical, directory })
+    if (entries.length >= (options.maxResults ?? 80)) break
+  }
+  return { ok: true, entries }
+}
+
 export function displayPath(value: string, homeDirectory: string): string {
   const normalized = value.replaceAll("\\", "/")
   const home = homeDirectory.replaceAll("\\", "/").replace(/\/$/, "")
@@ -360,10 +587,10 @@ export function rootSections(
   favoriteRoots: readonly string[],
   isValid: (root: string) => boolean = isDirectory,
 ): RootSections {
-  const favorites = [...new Set(favoriteRoots)].filter(isValid)
-  const favoriteSet = new Set(favorites)
-  const recentRoots = [...new Set(customRoots)]
-    .filter((root) => isValid(root) && !favoriteSet.has(root))
+  const favorites = dedupeRootPaths(favoriteRoots, isValid)
+  const favoriteKeys = new Set(favorites.map(rootPathKey))
+  const recentRoots = dedupeRootPaths(customRoots, isValid)
+    .filter((root) => !favoriteKeys.has(rootPathKey(root)))
     .slice(0, MAX_RECENT_ROOTS)
   return { recentRoots, favoriteRoots: favorites }
 }
@@ -470,3 +697,4 @@ export function readTree(root: string, expanded: ReadonlySet<string>): TreeEntry
   visit(root, 0)
   return entries
 }
+

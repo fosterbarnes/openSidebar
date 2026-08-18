@@ -1,6 +1,6 @@
 {
   "name": "open-sidebar",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "Directory browsing and pinned project scripts for the OpenCode TUI",
   "type": "module",
   "files": [

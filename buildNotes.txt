@@ -1,13 +1,1 @@
-Fixes. v1.2.6
-
-Settings
-- Project-specific openSidebar settings now override user settings
-
-Weekly Usage
-- Tells you when to reconnect if usage is unavailable
-
-Plugin
-- Correctly named 'openSidebar' in OpenCode plugins menu
-
-Maintenance
-- Cleaned up duplicate work without changing behavior
+Add Cursor to usage section. Search fixes v1.2.7
