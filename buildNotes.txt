@@ -1,1 +1,5 @@
-Add Cursor to usage section. Search fixes v1.2.7
+v1.2.8 release
+
+- Change what exactly is pasted to chat when clicking a file from the files pane
+- Scripts: left-click runs; right-click pastes the script path
+- Usage order is now Codex, Cursor, OpenCode Go, OpenRoute

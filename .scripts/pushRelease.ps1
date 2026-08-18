@@ -4,6 +4,7 @@
 param([Alias('h')][switch]$Help)
 
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot\scriptHelper.ps1"
 if ($Help) {
     Write-Host @"
 Usage:
@@ -15,14 +16,11 @@ publishes the GitHub release. Release notes are entered interactively.
     exit 0
 }
 
-$root = Split-Path -Path $PSScriptRoot -Parent
 Set-Location -LiteralPath $root
-$packagePath = "$root\package.json"
-$package = Get-Content -LiteralPath $packagePath -Raw -Encoding UTF8 | ConvertFrom-Json
-$version = [string]$package.version
+$version = $versionContents
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid package version: '$version'." }
 
-$tagName = "v$version"
+$tagName = getReleaseTag
 $releaseTitle = "openSidebar v$version"
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) "openSidebar-release-$version"
 $artifact = $null

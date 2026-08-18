@@ -1,9 +1,12 @@
 import { spawn } from "node:child_process"
+import { existsSync } from "node:fs"
+import path from "node:path"
 import type { Script, ScriptLauncher, ScriptTerminal, WezTermSplitSize } from "./helpers.js"
 
 export type RunResult = { target: string; error?: string }
 
 function available(command: string): Promise<boolean> {
+  if (path.isAbsolute(command)) return Promise.resolve(existsSync(command))
   return new Promise((resolve) => {
     const probe = spawn(process.platform === "win32" ? "where.exe" : "which", [command], {
       stdio: "ignore",
@@ -75,7 +78,7 @@ function sizeArgs(size: WezTermSplitSize | undefined): string[] {
 }
 
 function weztermCommand(): string {
-  return process.platform === "win32" ? "wezterm.exe" : "wezterm"
+  return process.platform === "win32" ? "C:\\Users\\Foster\\Apps\\wezterm\\wezterm.exe" : "wezterm"
 }
 
 function spawnWezterm(commandArgs: string[], cwd: string): Promise<{ paneID?: string; error?: string }> {

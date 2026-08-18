@@ -5,7 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { BUILTIN_SHELLS, clearCursorSessionToken, defaultScriptSettings, defaultSidebarSettings, dedupeRootPaths, displayPath, isDirectory, loadSidebarSettings, normalizeExtension, normalizeRootPath, normalizeScriptSettings, parseLauncher, readCursorSessionToken, readScripts, readTree, rootSections, runEverythingSearch, sameRootPath, saveSidebarSettings, sessionProjectDirectory, sidebarConfigPaths, updateLanguage, WEZTERM_TERMINALS, writeCursorSessionToken, type Script, type ScriptLanguage, type ScriptSettings, type SidebarSettings, type WezTermSplitSize } from "./helpers.js"
 import { cursorSessionCookie, probeCursorUsage, probeOpenAIUsage, probeOpenCodeGoUsage, probeOpenRouterUsage, type CursorUsage, type OpenAIUsage, type OpenCodeGoUsage, type OpenRouterUsage } from "./usage.js"
-import { placeScript, runScript as runNativeScript } from "./script-runner.js"
+import { placeScript, runScript as runNativeScript, scriptCommand } from "./script-runner.js"
 
 const DIRECTORY_COLORS = ["#F7E9B5", "#F4E1A0", "#F1D98B", "#EED076", "#EBC861"]
 const DIRECTORY_INDICATOR_COLORS = ["#DCCF99", "#D5C184", "#CEB56F", "#C7A95A", "#C09D45"]
@@ -512,6 +512,40 @@ return showRemaining()
       <box
         flexDirection="row"
         gap={1}
+        onMouseOver={() => setHovered("cursor-usage")}
+        onMouseOut={() => setHovered()}
+        onMouseUp={(event) => {
+          if (event.button === 2) {
+            promptCursorToken()
+            return
+          }
+          if (event.button === 0) {
+            if (cursorNeedsToken) promptCursorToken()
+            else setShowCursorRemaining((value) => !value)
+          }
+        }}
+      >
+        <text fg={api.theme.current.text}>
+          {showCursorRemaining() && !cursorNeedsToken ? "Cursor remaining:" : "Cursor:"}
+        </text>
+        <text fg={api.theme.current.textMuted}>
+          {cursorNeedsToken ? "sign in" : cursorValue}
+        </text>
+      </box>
+      <box flexDirection="row" gap={1}>
+        <text fg={api.theme.current.textMuted}>resets on</text>
+        <text fg={api.theme.current.textMuted}>
+          {cursorOk?.resetAt || (cursorNeedsToken ? "Cursor auth required" : "unavailable")}
+        </text>
+      </box>
+      <Show when={!cursorSnapshot.ok && cursorSnapshot.reason === "reauthenticate"}>
+        <box flexDirection="row" gap={1}>
+          <text fg={api.theme.current.textMuted}>click Cursor: to paste a new cookie</text>
+        </box>
+      </Show>
+      <box
+        flexDirection="row"
+        gap={1}
         onMouseOver={() => setHovered("go-usage")}
         onMouseOut={() => setHovered()}
         onMouseUp={(event) => {
@@ -546,40 +580,6 @@ return showRemaining()
           <text fg={api.theme.current.textMuted}>{`$${orOk?.usedUsd.toFixed(2)} / $${orOk?.limitUsd.toFixed(2)}`}</text>
         </box>
       </Show>
-      <box
-        flexDirection="row"
-        gap={1}
-        onMouseOver={() => setHovered("cursor-usage")}
-        onMouseOut={() => setHovered()}
-        onMouseUp={(event) => {
-          if (event.button === 2) {
-            promptCursorToken()
-            return
-          }
-          if (event.button === 0) {
-            if (cursorNeedsToken) promptCursorToken()
-            else setShowCursorRemaining((value) => !value)
-          }
-        }}
-      >
-        <text fg={api.theme.current.text}>
-          {showCursorRemaining() && !cursorNeedsToken ? "Cursor remaining:" : "Cursor:"}
-        </text>
-        <text fg={api.theme.current.textMuted}>
-          {cursorNeedsToken ? "sign in" : cursorValue}
-        </text>
-      </box>
-      <box flexDirection="row" gap={1}>
-        <text fg={api.theme.current.textMuted}>resets on</text>
-        <text fg={api.theme.current.textMuted}>
-          {cursorOk?.resetAt || (cursorNeedsToken ? "Cursor auth required" : "unavailable")}
-        </text>
-      </box>
-      <Show when={!cursorSnapshot.ok && cursorSnapshot.reason === "reauthenticate"}>
-        <box flexDirection="row" gap={1}>
-          <text fg={api.theme.current.textMuted}>click Cursor: to paste a new cookie</text>
-        </box>
-      </Show>
     </>
   }
   const toggleDirectory = (relativePath: string) => {
@@ -589,20 +589,25 @@ return showRemaining()
     setExpanded(next)
     setTree(readTree(root, next))
   }
-  const insertPath = (sessionID: string, filePath: string, absolute = false) => {
+  const insertChatText = (sessionID: string, text: string) => {
     const ref = promptRefs.get(sessionID)
     if (!ref) {
       api.ui.toast({ variant: "warning", message: "Chat input is not ready yet." })
       return
     }
+    const input = ref.current.input
+    ref.set({ ...ref.current, input: input ? `${input} ${text}` : text })
+  }
+  const insertPath = (sessionID: string, filePath: string, absolute = false) => {
     const sessionRoot = api.state.session.get(sessionID)?.directory
     const relativePath = sessionRoot ? path.relative(sessionRoot, filePath) : filePath
     const mentionPath = !absolute && relativePath && !path.isAbsolute(relativePath) && !relativePath.startsWith(`..${path.sep}`)
       ? relativePath
       : filePath
-    const mention = `@${mentionPath.replaceAll(path.sep, "/")}`
-    const input = ref.current.input
-    ref.set({ ...ref.current, input: input ? `${input} ${mention}` : mention })
+    insertChatText(sessionID, absolute ? `'${filePath}'` : `@${mentionPath.replaceAll(path.sep, "/")}`)
+  }
+  const pasteScript = (sessionID: string, script: Script) => {
+    insertChatText(sessionID, script.filePath ? `'${script.filePath}'` : scriptCommand(script))
   }
   const cycleVariant = (sessionID: string) => {
     promptRefs.get(sessionID)?.focus()
@@ -1288,7 +1293,7 @@ return showRemaining()
                   onMouseOver={() => setHovered(`script:${script.name}`)}
                   onMouseOut={() => setHovered()}
                   onMouseDown={(event) => {
-                    if (event.button === 2) placeScriptInTerminal(script)
+                     if (event.button === 2) pasteScript(props.session_id, script)
                     else if (event.button === 0) runScript(script)
                   }}
                 >
@@ -1349,7 +1354,7 @@ return showRemaining()
                     onMouseOut={() => setHovered()}
                     onMouseDown={() => {
                       if (entry.directory) toggleDirectory(entry.relativePath)
-                      else insertPath(props.session_id, entry.fullPath)
+                      else insertPath(props.session_id, entry.fullPath, true)
                     }}
                   >
                     <text fg={hovered() === `tree:${entry.relativePath}` ? hoverColor : entry.directory ? directoryColor(entry.depth, DIRECTORY_INDICATOR_COLORS) : api.theme.current.text}>{"  ".repeat(entry.depth)}</text>
@@ -1382,4 +1387,3 @@ const plugin: TuiPluginModule & { id: string } = {
 }
 
 export default plugin
-

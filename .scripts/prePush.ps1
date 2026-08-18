@@ -2,6 +2,7 @@
 param()
 
 $ErrorActionPreference = "Stop"
+. "$PSScriptRoot\scriptHelper.ps1"
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {

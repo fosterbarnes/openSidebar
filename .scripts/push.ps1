@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot\scriptHelper.ps1"
 $root = Split-Path -Path $PSScriptRoot -Parent
 Set-Location -LiteralPath $root
 
