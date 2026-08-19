@@ -43,9 +43,24 @@ Built in search levereges Everything by Void Tools to quickly search files/folde
 
 
 ## Install
-1. Open `%USERPROFILE%\.config\opencode\tui.json`
-2. Add:
-```json
-{ "plugin": ["open-sidebar"] }
+
+TUI plugins belong in **`tui.json`**, not `opencode.json` / `opencode.jsonc`.
+
+**Recommended**
+
+```powershell
+opencode plugin -g open-sidebar
 ```
+
+**Manual**
+
+1. Open or create `%USERPROFILE%\.config\opencode\tui.json`
+2. Add `"open-sidebar"` to the existing `"plugin"` array (merge; do not replace the whole file). Example fragment:
+
+```json
+"plugin": ["open-sidebar"]
+```
+
 3. Restart OpenCode.
+
+After a release you can pin, for example `"open-sidebar@1.2.14"`.

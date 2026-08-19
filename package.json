@@ -1,14 +1,15 @@
 {
   "name": "open-sidebar",
-  "version": "1.2.13",
+  "version": "1.2.14",
   "description": "Directory browsing and pinned project scripts for the OpenCode TUI",
   "type": "module",
   "files": [
     "dist",
     "README.md"
   ],
-  "main": "dist/sidebar.js",
-  "types": "dist/sidebar.d.ts",
+  "exports": {
+    "./tui": "./dist/sidebar.js"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -27,7 +28,8 @@
   },
   "license": "MIT",
   "engines": {
-    "node": ">=22"
+    "node": ">=22",
+    "opencode": ">=1.18.0"
   },
   "publishConfig": {
     "access": "public"
