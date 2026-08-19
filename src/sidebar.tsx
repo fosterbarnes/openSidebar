@@ -3,7 +3,7 @@ import type { TuiDialogSelectProps, TuiPlugin, TuiPluginModule, TuiPromptRef } f
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { BUILTIN_SHELLS, clearCursorSessionToken, defaultScriptSettings, defaultSidebarSettings, dedupeRootPaths, displayPath, isDirectory, loadSidebarSettings, normalizeExtension, normalizeRootPath, normalizeScriptSettings, parseLauncher, readCursorSessionToken, readScripts, readTree, rootSections, runEverythingSearch, sameRootPath, saveSidebarSettings, sessionProjectDirectory, sidebarConfigPaths, updateLanguage, WEZTERM_TERMINALS, writeCursorSessionToken, type Script, type ScriptLanguage, type ScriptSettings, type SidebarSettings, type WezTermSplitSize } from "./helpers.js"
+import { BUILTIN_SHELLS, clearCursorSessionToken, defaultScriptSettings, defaultSidebarSettings, dedupeRootPaths, displayPath, isDirectory, loadSidebarSettings, normalizeExtension, normalizeRootPath, normalizeScriptSettings, parseLauncher, readCursorSessionToken, readScripts, readTree, rootSections, runEverythingSearch, sameRootPath, saveSidebarSettings, saveUserScriptSettings, sessionProjectDirectory, sidebarConfigPaths, updateLanguage, WEZTERM_TERMINALS, writeCursorSessionToken, type Script, type ScriptLanguage, type ScriptSettings, type SidebarSettings, type WezTermSplitSize } from "./helpers.js"
 import { cursorSessionCookie, probeCursorUsage, probeOpenAIUsage, probeOpenCodeGoUsage, probeOpenRouterUsage, type CursorUsage, type OpenAIUsage, type OpenCodeGoUsage, type OpenRouterUsage } from "./usage.js"
 import { runScript as runNativeScript, scriptCommand } from "./script-runner.js"
 
@@ -207,7 +207,9 @@ const tui: TuiPlugin = async (api, options) => {
 
   const saveProjectSettings = () => {
     const paths = sidebarConfigPaths(projectConfigRoot, os.homedir())
-    saveSidebarSettings(paths.project, sidebarSettings)
+    const projectSettings = { ...sidebarSettings }
+    delete (projectSettings as { scripts?: ScriptSettings }).scripts
+    saveSidebarSettings(paths.project, projectSettings)
   }
 
   const loadProjectOwnedState = () => {
@@ -804,7 +806,7 @@ return showRemaining()
   const saveScriptSettings = (next: ScriptSettings, message = "Script settings updated") => {
     scriptSettings = normalizeScriptSettings(next, sidebarSettings.scripts)
     sidebarSettings.scripts = scriptSettings
-    saveProjectSettings()
+    saveUserScriptSettings(os.homedir(), scriptSettings)
     setScripts(readScripts(project, root, scriptSettings))
     refreshCommands()
     api.ui.toast({ variant: "success", message })
@@ -812,10 +814,10 @@ return showRemaining()
   const resetScriptSettings = () => {
     scriptSettings = normalizeScriptSettings(null, sidebarSettings.scripts)
     sidebarSettings.scripts = scriptSettings
-    saveProjectSettings()
+    saveUserScriptSettings(os.homedir(), scriptSettings)
     setScripts(readScripts(project, root, scriptSettings))
     refreshCommands()
-    api.ui.toast({ variant: "success", message: "Script settings reset" })
+    api.ui.toast({ variant: "success", message: "Global script settings reset" })
   }
   const toggleLanguage = (languageID: string) => {
     saveScriptSettings(updateLanguage(scriptSettings, languageID, (language) => ({ ...language, enabled: !language.enabled })))
@@ -990,11 +992,11 @@ return showRemaining()
       ...extensionOptions,
       { title: "Add custom executable...", value: ADD_SCRIPT_EXECUTABLE },
       { title: "Add custom extension...", value: ADD_SCRIPT_EXTENSION },
-      { title: "Reset project script settings", value: RESET_SCRIPT_SETTINGS },
+      { title: "Reset global script settings", value: RESET_SCRIPT_SETTINGS },
     ]
     const selectedTerminal = scriptSettings.terminal === "native" ? "terminal:native" : `terminal:${scriptSettings.terminal}`
     const dialogProps = {
-      title: `Project scripts: ${project}`,
+      title: `Global script settings`,
       skipFilter: true,
       options,
       current: selectedTerminal,

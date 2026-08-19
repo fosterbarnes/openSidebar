@@ -3,7 +3,7 @@ import test from "node:test"
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { defaultScriptSettings, displayPath, everythingSearchArgs, everythingSearchQuery, loadSidebarSettings, MAX_RECENT_ROOTS, normalizeExtension, normalizeRootPath, normalizeSidebarSettings, normalizeScriptSettings, parseLauncher, promptProjectDirectory, readCursorSessionToken, readScripts, readTree, rootPathKey, rootSections, runEverythingSearch, sameRootPath, saveSidebarSettings, sessionProjectDirectory, sidebarConfigPaths, writeCursorSessionToken, clearCursorSessionToken, cursorSessionSecretPath } from "../src/helpers.ts"
+import { defaultScriptSettings, displayPath, everythingSearchArgs, everythingSearchQuery, loadSidebarSettings, MAX_RECENT_ROOTS, normalizeExtension, normalizeRootPath, normalizeSidebarSettings, normalizeScriptSettings, parseLauncher, promptProjectDirectory, readCursorSessionToken, readScripts, readTree, rootPathKey, rootSections, runEverythingSearch, sameRootPath, saveSidebarSettings, saveUserScriptSettings, sessionProjectDirectory, sidebarConfigPaths, writeCursorSessionToken, clearCursorSessionToken, cursorSessionSecretPath } from "../src/helpers.ts"
 import { cursorSessionCookie, cursorDbPath, probeCursorUsage, probeOpenAIUsage, probeOpenCodeGoUsage, probeOpenRouterUsage, resolveAuthPath } from "../src/usage.ts"
 import { commandArgs, scriptCommand, weztermArgs, weztermSendArgs } from "../src/script-runner.ts"
 
@@ -654,6 +654,24 @@ test("writes complete sidebar settings as JSON", () => {
     const sidebar = normalizeSidebarSettings({ scripts: settings, scriptPins: ["build"] })
     saveSidebarSettings(filePath, sidebar)
     assert.deepEqual(loadSidebarSettings(root, root, path.join(root, "missing-user.json"), filePath).scriptPins, ["build"])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("saveUserScriptSettings persists a global default applied when the project config has no scripts", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-user-scripts-"))
+  try {
+    const home = path.join(root, "home")
+    const userPath = path.join(home, ".config", "openSidebar", "config.json")
+    mkdirSync(path.dirname(userPath), { recursive: true })
+    writeFileSync(userPath, JSON.stringify({ showMcp: true, scripts: { terminal: "native" } }))
+    saveUserScriptSettings(home, normalizeScriptSettings({ terminal: "wezterm-vertical", wezterm: { vertical: { Cells: 20 } } }))
+    const projectPath = path.join(root, "project", ".config", "openSidebar.json")
+    const settings = loadSidebarSettings(path.join(root, "project"), home, userPath, projectPath)
+    assert.equal(settings.scripts.terminal, "wezterm-vertical")
+    assert.deepEqual(settings.scripts.wezterm.vertical, { Cells: 20 })
+    assert.equal(settings.visibility.showMcp, true)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

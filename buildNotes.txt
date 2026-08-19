@@ -1,5 +1,5 @@
-v1.2.9
+v1.2.10 release
 
-Files
-- Right-click a file or folder in the files list to paste its quoted path into chat.
-- Left-click still expands folders and pastes a file path.
+Scripts
+- Script settings changes update the global default
+- If a project config contains its own scripts block, it can still override the global default

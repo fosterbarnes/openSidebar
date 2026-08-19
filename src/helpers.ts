@@ -334,6 +334,13 @@ export function saveSidebarSettings(filePath: string, settings: SidebarSettings)
   fs.renameSync(temporary, filePath)
 }
 
+export function saveUserScriptSettings(homeDirectory: string, scripts: ScriptSettings): void {
+  const filePath = path.join(homeDirectory, ".config", "openSidebar", "config.json")
+  const existing = readJsonFile(filePath)
+  const base = existing && typeof existing === "object" ? existing as Record<string, unknown> : {}
+  writeJsonObject(filePath, { ...base, scripts })
+}
+
 function cursorSettingsPath(homeDirectory: string): string {
   return path.join(homeDirectory, ".config", "openSidebar", "config.json")
 }
