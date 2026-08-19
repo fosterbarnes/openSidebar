@@ -1,5 +1,5 @@
-v1.2.8 release
+v1.2.9
 
-- Change what exactly is pasted to chat when clicking a file from the files pane
-- Scripts: left-click runs; right-click pastes the script path
-- Usage order is now Codex, Cursor, OpenCode Go, OpenRoute
+Files
+- Right-click a file or folder in the files list to paste its quoted path into chat.
+- Left-click still expands folders and pastes a file path.

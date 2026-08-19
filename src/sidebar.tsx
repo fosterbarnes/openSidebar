@@ -5,7 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { BUILTIN_SHELLS, clearCursorSessionToken, defaultScriptSettings, defaultSidebarSettings, dedupeRootPaths, displayPath, isDirectory, loadSidebarSettings, normalizeExtension, normalizeRootPath, normalizeScriptSettings, parseLauncher, readCursorSessionToken, readScripts, readTree, rootSections, runEverythingSearch, sameRootPath, saveSidebarSettings, sessionProjectDirectory, sidebarConfigPaths, updateLanguage, WEZTERM_TERMINALS, writeCursorSessionToken, type Script, type ScriptLanguage, type ScriptSettings, type SidebarSettings, type WezTermSplitSize } from "./helpers.js"
 import { cursorSessionCookie, probeCursorUsage, probeOpenAIUsage, probeOpenCodeGoUsage, probeOpenRouterUsage, type CursorUsage, type OpenAIUsage, type OpenCodeGoUsage, type OpenRouterUsage } from "./usage.js"
-import { placeScript, runScript as runNativeScript, scriptCommand } from "./script-runner.js"
+import { runScript as runNativeScript, scriptCommand } from "./script-runner.js"
 
 const DIRECTORY_COLORS = ["#F7E9B5", "#F4E1A0", "#F1D98B", "#EED076", "#EBC861"]
 const DIRECTORY_INDICATOR_COLORS = ["#DCCF99", "#D5C184", "#CEB56F", "#C7A95A", "#C09D45"]
@@ -413,17 +413,6 @@ const tui: TuiPlugin = async (api, options) => {
       api.ui.toast({ variant: "success", message: `Started ${script.name} in ${result.target}.` })
     } else {
       api.ui.toast({ variant: "error", message: `Could not start ${script.name}: ${result.error}` })
-    }
-  }
-  const placeScriptInTerminal = async (script: Script) => {
-    const current = api.route.current
-    const sessionID = current.name === "session" ? current.params?.sessionID : undefined
-    const cwd = typeof sessionID === "string" ? api.state.session.get(sessionID)?.directory : project
-    const result = await placeScript(script, cwd || project)
-    if (!result.error) {
-      api.ui.toast({ variant: "success", message: `Placed ${script.name} in ${result.target}.` })
-    } else {
-      api.ui.toast({ variant: "error", message: `Could not place ${script.name}: ${result.error}` })
     }
   }
   const weeklyUsage = () => {
@@ -1352,7 +1341,11 @@ return showRemaining()
                     paddingRight={1}
                     onMouseOver={() => setHovered(`tree:${entry.relativePath}`)}
                     onMouseOut={() => setHovered()}
-                    onMouseDown={() => {
+                    onMouseDown={(event) => {
+                      if (event.button === 2) {
+                        insertPath(props.session_id, entry.fullPath, true)
+                        return
+                      }
                       if (entry.directory) toggleDirectory(entry.relativePath)
                       else insertPath(props.session_id, entry.fullPath, true)
                     }}

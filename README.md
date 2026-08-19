@@ -34,14 +34,14 @@ The cookie is a login secret: it is stored only in `~/.config/openSidebar/cursor
 
 **`Scripts`**
 
-Run/reference project scripts with the configured shell or language runner. Left-click to run, right-click to place the command in the configured WezTerm target without running it. Click `scripts` to configure runners, tracked extensions, and other settings.
+Run/reference project scripts with the configured shell or language runner. Left-click to run, right-click to paste the script path or command into chat. Click `scripts` to configure runners, tracked extensions, and other settings.
 
 Built with wezterm, pwsh and Windows in mind first, so un-tested issues may come up on other platforms
 
 
 **`Files`**
 
-Browse/copy files in-terminal. Click the label or `[project]` to open the file-root picker: switch the tree root, favorite the highlighted directory with Ctrl+F, and pick recent dirs. Recents and favorites are stored in the project `.config/openSidebar.json` (shared across sessions). Type in the picker to search file and folder names under the project, your recents, and your favorites using [Everything](https://www.voidtools.com/) (`es.exe` on PATH, with the Everything app running). Matches appear directly under the search box; clearing the box restores the usual project, favorite, and recent rows.
+Browse files in the sidebar. Left-click a folder to expand or collapse it. Left-click a file, or right-click a file or folder, to paste its quoted path into chat. Click the label or `[project]` to open the file-root picker: switch the tree root, favorite the highlighted directory with Ctrl+F, and pick recent dirs. Recents and favorites are stored in the project `.config/openSidebar.json` (shared across sessions). Type in the picker to search file and folder names under the project, your recents, and your favorites using [Everything](https://www.voidtools.com/) (`es.exe` on PATH, with the Everything app running). Matches appear directly under the search box; clearing the box restores the usual project, favorite, and recent rows.
 
 When launched with `oc <directory>`, a fresh session uses the project name. The
 first duplicate gets a numeric suffix such as `openSidebar1`, followed by
