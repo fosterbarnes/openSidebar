@@ -29,15 +29,4 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: test "v$(node -p "require('./package.json').version")" = "${GITHUB_REF_NAME}"
-      - name: Diagnose OIDC env
-        shell: bash
-        run: |
-          echo "npm=$(npm --version) node=$(node --version)"
-          echo "GITHUB_ACTIONS=${GITHUB_ACTIONS:-unset}"
-          echo "OIDC_URL_SET=$([ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && echo yes || echo no)"
-          echo "OIDC_TOKEN_SET=$([ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ] && echo yes || echo no)"
-          echo "NODE_AUTH_TOKEN_SET=$([ -n "$NODE_AUTH_TOKEN" ] && echo yes || echo no)"
-          echo "npmrc=$(npm config get userconfig)"
-          if [ -f "$(npm config get userconfig)" ]; then grep -v '^#' "$(npm config get userconfig)" | grep -v 'auth' || true; fi
-          npm config get registry
-      - run: npm publish --provenance --access public --loglevel http
+      - run: npm publish --provenance --access public
