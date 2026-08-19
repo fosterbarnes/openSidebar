@@ -1,3 +1,3 @@
-v1.2.12 release
+v1.2.13 release
 
-Fix push script
+- More generous 'cd path/here' detection for auto-setting file/script path on first message

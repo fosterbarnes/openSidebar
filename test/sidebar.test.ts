@@ -591,6 +591,9 @@ test("resolves a project from an initial cd prompt without changing directories"
     assert.equal(promptProjectDirectory(`"cd ${project}"`, root), project)
     assert.equal(promptProjectDirectory(`cd ${path.join(root, "missing")}`, root), undefined)
     assert.equal(promptProjectDirectory(`Set directory to ${project}`, root), undefined)
+    assert.equal(promptProjectDirectory(`run cd ${project} then npm test`, root), project)
+    assert.equal(promptProjectDirectory(`cd ${project}\nSet the shell working directory to that path.`, root), project)
+    assert.equal(promptProjectDirectory(`"cd ${project}\nmore lines\ncall a listed tool."`, root), project)
     assert.equal(sessionProjectDirectory([{ id: "message", role: "user" }], () => [{ type: "text", text: `cd ${project}` }], root), project)
   } finally {
     rmSync(root, { recursive: true, force: true })

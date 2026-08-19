@@ -278,10 +278,11 @@ export function sidebarConfigPaths(projectRoot: string, homeDirectory = os.homed
 
 export function promptProjectDirectory(prompt: unknown, homeDirectory = os.homedir()): string | undefined {
   if (typeof prompt !== "string") return undefined
-  const match = prompt.trim().replace(/^(["']).*\1$/, (value) => value.slice(1, -1)).match(/^cd\s+(.+?)\s*$/i)
-  if (!match) return undefined
-  const candidate = match[1].trim().replace(/^['"]|['"]$/g, "")
-  return path.isAbsolute(candidate) && candidate !== homeDirectory && isDirectory(candidate) ? path.normalize(candidate) : undefined
+  for (const match of prompt.matchAll(/\bcd\s+(?:"([^"]+)"|'([^']+)'|(\S+))/gi)) {
+    const candidate = (match[1] ?? match[2] ?? match[3]).trim().replace(/^['"]|['"]$/g, "")
+    if (path.isAbsolute(candidate) && candidate !== homeDirectory && isDirectory(candidate)) return path.normalize(candidate)
+  }
+  return undefined
 }
 
 export function sessionProjectDirectory(
