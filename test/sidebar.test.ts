@@ -712,6 +712,7 @@ test("parses Cursor monthly usage with a pasted session cookie", async () => {
   assert.equal(cookie, `WorkosCursorSessionToken=auth0%7Cuser_test%3A%3A${jwt}`)
   if (result.ok) {
     assert.equal(result.monthly.usedPercent, 1)
+    assert.equal(result.monthly.apiUsedPercent, null)
     assert.match(result.monthly.resetAt ?? "", /2026/)
   }
 })
@@ -735,7 +736,47 @@ test("uses Cursor autoPercentUsed when used over limit would disagree", async ()
     }),
   })
   assert.equal(result.ok, true)
-  if (result.ok) assert.equal(result.monthly.usedPercent, 1)
+  if (result.ok) {
+    assert.equal(result.monthly.usedPercent, 1)
+    assert.equal(result.monthly.apiUsedPercent, 0)
+  }
+})
+
+test("parses Cursor Other Models API percent independently", async () => {
+  const jwt = fakeCursorJwt("auth0|user_test")
+  const missingDb = path.join(os.tmpdir(), "sidebar-cursor-missing-db", "state.vscdb")
+  const result = await probeCursorUsage({
+    cursorDbPath: missingDb,
+    cursorSessionToken: `auth0|user_test::${jwt}`,
+    fetchImpl: async () => cursorSummaryResponse({
+      individualUsage: {
+        plan: {
+          used: 467,
+          limit: 2000,
+          remaining: 1533,
+          autoPercentUsed: 13.4,
+          apiPercentUsed: 3.333,
+        },
+      },
+    }),
+  })
+  assert.equal(result.ok, true)
+  if (result.ok) {
+    assert.equal(result.monthly.usedPercent, 13)
+    assert.equal(result.monthly.apiUsedPercent, 3)
+  }
+  const omitted = await probeCursorUsage({
+    cursorDbPath: missingDb,
+    cursorSessionToken: `auth0|user_test::${jwt}`,
+    fetchImpl: async () => cursorSummaryResponse({
+      individualUsage: { plan: { autoPercentUsed: 13 } },
+    }),
+  })
+  assert.equal(omitted.ok, true)
+  if (omitted.ok) {
+    assert.equal(omitted.monthly.usedPercent, 13)
+    assert.equal(omitted.monthly.apiUsedPercent, null)
+  }
 })
 
 test("builds a session cookie from a bare Cursor JWT", () => {
@@ -866,6 +907,7 @@ test("shows an unlimited Cursor plan with its reset date", async () => {
   assert.equal(result.ok, true)
   if (result.ok) {
     assert.equal(result.monthly.usedPercent, null)
+    assert.equal(result.monthly.apiUsedPercent, null)
     assert.match(result.monthly.resetAt ?? "", /2026/)
   }
 })

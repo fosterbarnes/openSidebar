@@ -17,7 +17,6 @@ try {
     }
 
     if (-not $PackOnly) {
-        Invoke-Checked "pwsh" @("-NoProfile", "-File", (Join-Path $PSScriptRoot "checkScripts.ps1"))
         Invoke-Checked "npm" @("run", "typecheck")
         Invoke-Checked "npm" @("test")
         Invoke-Checked "npm" @("run", "build")

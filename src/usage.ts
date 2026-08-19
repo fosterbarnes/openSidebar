@@ -51,7 +51,7 @@ export type OpenRouterUsage = {
 
 export type CursorUsage = {
   ok: true
-  monthly: UsageWindow
+  monthly: UsageWindow & { apiUsedPercent: number | null }
 } | {
   ok: false
   reason?: "need-token" | "reauthenticate"
@@ -341,22 +341,26 @@ function parseCursorUsageResponse(value: unknown, nowMs: number): CursorUsage {
     ? (body.individualUsage as { plan?: unknown }).plan
     : undefined
   if (!plan || typeof plan !== "object") return { ok: false }
-  const window = plan as { used?: unknown; limit?: unknown; autoPercentUsed?: unknown; totalPercentUsed?: unknown }
+  const window = plan as { used?: unknown; limit?: unknown; autoPercentUsed?: unknown; apiPercentUsed?: unknown; totalPercentUsed?: unknown }
+  const clampPercent = (value: unknown): number | null =>
+    typeof value === "number" && Number.isFinite(value)
+      ? Math.round(Math.max(0, Math.min(100, value)))
+      : null
   const usedPercent = body.isUnlimited === true
     ? null
-    : typeof window.autoPercentUsed === "number" && Number.isFinite(window.autoPercentUsed)
-      ? Math.round(Math.max(0, Math.min(100, window.autoPercentUsed)))
-      : typeof window.used === "number" && Number.isFinite(window.used)
+    : clampPercent(window.autoPercentUsed)
+      ?? (typeof window.used === "number" && Number.isFinite(window.used)
         && typeof window.limit === "number" && Number.isFinite(window.limit) && window.limit > 0
         ? Math.round(Math.max(0, Math.min(100, window.used / window.limit * 100)))
         : typeof window.totalPercentUsed === "number" && Number.isFinite(window.totalPercentUsed)
           ? Math.round(Math.max(0, Math.min(100, window.totalPercentUsed <= 1 ? window.totalPercentUsed * 100 : window.totalPercentUsed)))
-          : null
+          : null)
   if (usedPercent === null && body.isUnlimited !== true) return { ok: false }
   return {
     ok: true,
     monthly: {
       usedPercent,
+      apiUsedPercent: clampPercent(window.apiPercentUsed),
       resetAt: resetAt.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }),
       minutes: null,
     },

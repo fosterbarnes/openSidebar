@@ -10,6 +10,8 @@ $versionTag = "$versionFolder\versionTag"
 $buildNotes = "$repoRoot\buildNotes.txt"
 $readme = "$repoRoot\README.md"
 $scripts = "$repoRoot\.scripts"
+$appPublisher = 'fosterbarnes'
+$ghRepo = "$appPublisher/openSidebar"
 $noBom = New-Object System.Text.UTF8Encoding $false
 $weztermExe = (Get-Command wezterm.exe -ErrorAction SilentlyContinue)?.Source
 

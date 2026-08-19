@@ -3,6 +3,8 @@ Sidebar customization plugin for OpenCode.
 
 *NOT COMPLETE* - tested only on Windows 10 LTSC IoT. Linux/Mac planned but not guaranteed to work. PRs/forks welcome.
 
+`AGENTS.md` still forbids deleting files and editing files without confirmation. SuperPlan+ / planning agents may create and edit the temporary plan `.md` for the current task without asking first. That exception is only the agent-created plan file, not project source, not `buildNotes.txt`, and not deletes.
+
 ## Features
 
 ### Header buttons
@@ -26,6 +28,7 @@ see your weekly usage and when it resets. not all platforms are currently suppor
 **Cursor usage**
 
 If Cursor is installed and you are signed in on this machine, the Cursor row fills in by itself.
+It shows Cursor Models percent, then Other Models as `N% api` (for example `14%, 0% api`). Click the row to flip both to remaining.
 If it shows `sign in`, click it and follow the numbered steps.
 The cookie is a login secret: it is stored only in `~/.config/openSidebar/cursor-session` (created automatically when you paste), not in project config, and never committed.
 

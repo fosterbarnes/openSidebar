@@ -472,9 +472,11 @@ return showRemaining()
       : "unavailable"
     const cursorSnapshot = cursorUsage()
     const cursorOk = cursorSnapshot.ok ? cursorSnapshot.monthly : undefined
-    const cursorValue = cursorOk?.usedPercent === null || cursorOk?.usedPercent === undefined
-      ? "unavailable"
-      : `${showCursorRemaining() ? 100 - cursorOk.usedPercent : cursorOk.usedPercent}%`
+    const cursorSide = (used: number | null | undefined) =>
+      used === null || used === undefined
+        ? "unavailable"
+        : `${showCursorRemaining() ? 100 - used : used}%`
+    const cursorValue = `${cursorSide(cursorOk?.usedPercent)}, ${cursorSide(cursorOk?.apiUsedPercent)} api`
     const cursorNeedsToken = !cursorSnapshot.ok && (cursorSnapshot.reason === "need-token" || cursorSnapshot.reason === "reauthenticate")
     return <>
       <box flexDirection="row" gap={1}>
