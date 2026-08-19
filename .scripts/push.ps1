@@ -1,27 +1,16 @@
 #requires -Version 7.0
-
-[CmdletBinding()]
-param(
-    [Parameter(Mandatory, Position = 0)][string]$Message,
-    [Alias('f')][switch]$Force
-)
-
+param([Alias('f')][switch]$Force, [Parameter(Position = 0)][string]$Message)
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\scriptHelper.ps1"
-$root = Split-Path -Path $PSScriptRoot -Parent
-Set-Location -LiteralPath $root
-
-$branch = if (git branch --list main) { 'main' }
-          elseif (git branch --list master) { 'master' }
-          else { Read-Host 'Branch name' }
-if (-not $branch) { throw 'A branch name is required.' }
-
-& git add -A
-if ($LASTEXITCODE -ne 0) { throw "git add failed (exit $LASTEXITCODE)." }
-
-& git commit -m $Message
-if ($LASTEXITCODE -ne 0) { throw "git commit failed (exit $LASTEXITCODE)." }
-
-$pushArgs = if ($Force) { @('--force') } else { @() }
-& git push origin $branch @pushArgs
-if ($LASTEXITCODE -ne 0) { throw "git push failed (exit $LASTEXITCODE)." }
+Set-Location -LiteralPath $repoRoot
+$commitMessage = if (Test-Path -LiteralPath $buildNotes) { ([IO.File]::ReadAllLines($buildNotes) | Where-Object { $_.Trim() } | Select-Object -First 1).Trim() } else { '' }
+if (-not $commitMessage) { $commitMessage = $Message }
+if (-not $commitMessage) { throw 'Provide a commit message or add a non-empty first line to buildNotes.txt.' }
+$branch = ((& git branch --show-current) | Out-String).Trim()
+if ($LASTEXITCODE) { throw 'Could not determine the current branch.' }
+if (-not $branch) { throw 'Detached HEAD; refusing to push.' }
+runNativeCommand git @('add', '-A') 'git add'
+runNativeCommand git @('commit', '-m', $commitMessage) 'git commit'
+$pushArgs = @('push', 'origin', $branch); if ($Force) { $pushArgs += '--force' }
+runNativeCommand git $pushArgs 'git push'
+closeOut 3

@@ -1,22 +1,7 @@
 #requires -Version 7.0
-
-[CmdletBinding()]
-param([Alias('h')][switch]$Help)
-
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\scriptHelper.ps1"
-if ($Help) {
-    Write-Host @"
-Usage:
-  .\pushRelease.ps1
-
-Builds the npm package, replaces the matching Git tag, pushes the tag, and
-publishes the GitHub release. Release notes are entered interactively.
-"@
-    exit 0
-}
-
-Set-Location -LiteralPath $root
+Set-Location -LiteralPath $repoRoot
 $version = $versionContents
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid package version: '$version'." }
 
@@ -28,51 +13,23 @@ $artifact = $null
 try {
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
 
-    & npm run build
-    if ($LASTEXITCODE -ne 0) { throw "npm run build failed (exit $LASTEXITCODE)." }
-
     & npm pack --pack-destination $tempRoot
     if ($LASTEXITCODE -ne 0) { throw "npm pack failed (exit $LASTEXITCODE)." }
     $artifact = Get-ChildItem -LiteralPath $tempRoot -Filter '*.tgz' -File | Select-Object -First 1
     if (-not $artifact) { throw "npm pack produced no tarball in '$tempRoot'." }
 
-    Write-Host "Version: $version"
-    Write-Host "Enter release notes. Finish with two empty lines."
-    $releaseNotesLines = @()
-    $emptyLines = 0
-    while ($true) {
-        $line = Read-Host ">"
-        if ($line -eq '') {
-            $emptyLines++
-            if ($emptyLines -ge 2) { break }
-            $releaseNotesLines += ''
-            continue
-        }
-        $emptyLines = 0
-        $releaseNotesLines += ($line -replace "`t", '    ')
-    }
-    if (-not ($releaseNotesLines -join '').Trim()) { throw 'No release notes entered.' }
-    $releaseNotes = ($releaseNotesLines -join "`n").Trim()
+    $notes = if (Test-Path -LiteralPath $buildNotes) { [IO.File]::ReadAllText($buildNotes).Trim() } else { '' }
 
-    if (git tag -l $tagName) {
-        & git tag -d $tagName
-        if ($LASTEXITCODE -ne 0) { throw "Could not delete local tag '$tagName'." }
-    }
-    $remoteTags = @(git ls-remote --tags origin "refs/tags/$tagName")
-    if ($remoteTags.Count -gt 0) {
-        & git push origin --delete $tagName
-        if ($LASTEXITCODE -ne 0) { throw "Could not delete remote tag '$tagName'." }
-    }
+    runNativeCommand git @('tag', '-f', $tagName) 'git tag'
+    runNativeCommand git @('push', 'origin', "refs/tags/$tagName", '--force') 'git push tag'
 
-    & git tag $tagName
-    if ($LASTEXITCODE -ne 0) { throw "Could not create tag '$tagName'." }
-    & git push origin $tagName
-    if ($LASTEXITCODE -ne 0) { throw "Could not push tag '$tagName'." }
-    & gh release create $tagName $artifact.FullName --title $releaseTitle --notes $releaseNotes --latest
-    if ($LASTEXITCODE -ne 0) { throw "gh release create failed (exit $LASTEXITCODE)." }
+    $releaseArgs = @('release', 'create', $tagName, '--title', $releaseTitle, '--latest')
+    if ($notes) { $releaseArgs += @('--notes', $notes) } else { $releaseArgs += '--generate-notes' }
+    runNativeCommand gh ($releaseArgs + $artifact.FullName) 'gh release create'
 }
 finally {
     if (Test-Path -LiteralPath $tempRoot) {
         Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+closeOut 3

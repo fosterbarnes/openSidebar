@@ -2,6 +2,7 @@
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
+Set-Location -LiteralPath $root
 $scriptPath = Join-Path $PSScriptRoot 'newVersion.ps1'
 $shell = (Get-Command pwsh -ErrorAction SilentlyContinue)?.Source
 if (-not $shell) { $shell = (Get-Command powershell -ErrorAction SilentlyContinue)?.Source }

@@ -1,8 +1,10 @@
+#requires -Version 7.0
 [CmdletBinding()]
 param()
 
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\scriptHelper.ps1"
+Set-Location -LiteralPath $repoRoot
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
@@ -27,3 +29,4 @@ try {
 finally {
     Pop-Location
 }
+

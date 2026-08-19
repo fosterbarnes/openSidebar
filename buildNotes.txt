@@ -1,5 +1,3 @@
-v1.2.10 release
+v1.2.11 release
 
-Scripts
-- Script settings changes update the global default
-- If a project config contains its own scripts block, it can still override the global default
+Fix npm release issues. First time publishing with npm, sorry lol
