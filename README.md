@@ -3,76 +3,44 @@ Sidebar customization plugin for OpenCode.
 
 *NOT COMPLETE* - tested only on Windows 10 LTSC IoT. Linux/Mac planned but not guaranteed to work. PRs/forks welcome.
 
-`AGENTS.md` still forbids deleting files and editing files without confirmation. SuperPlan+ / planning agents may create and edit the temporary plan `.md` for the current task without asking first. That exception is only the agent-created plan file, not project source, not `buildNotes.txt`, and not deletes.
+<img src=".res/scr/1.png" width="300">
 
 ## Features
 
 ### Header buttons
 
-**`> Switch Session`**
 
-invokes the 'switch session' command
+**`> Switch Session`** : clicking here invokes the 'switch session' command
 
-**`> model`**
+**`> model`** : brings up the 'select model' menu. the label shows the current model
 
-brings up the 'select model' menu
+**`> weight`** : toggle through model weight / variant options
 
-**`> weight`**
+### Usage Meter
 
-toggle through weight options
+#### Supported subscriptions
 
-**`Weekly usage`**
+- Codex
+- OpenCode Go
+- Cursor
 
-see your weekly usage and when it resets. not all platforms are currently supported
+#### Supported API services
 
-**Cursor usage**
+- OpenRouter
 
-If Cursor is installed and you are signed in on this machine, the Cursor row fills in by itself.
-It shows Cursor Models percent, then Other Models as `N% api` (for example `14%, 0% api`). Click the row to flip both to remaining.
-If it shows `sign in`, click it and follow the numbered steps.
-The cookie is a login secret: it is stored only in `~/.config/openSidebar/cursor-session` (created automatically when you paste), not in project config, and never committed.
-
-
-### Main sidebar menu
+### Files / Scripts
 
 **`Scripts`**
 
-Run/reference project scripts with the configured shell or language runner. Left-click to run, right-click to paste the script path or command into chat. Click `scripts` to configure runners, tracked extensions, and other settings.
-
-Built with wezterm, pwsh and Windows in mind first, so un-tested issues may come up on other platforms
+Quickly run or reference project scripts. Left-click a script to run it, right-click to drop the path into chat. Runs go through the configured shell/language runner.
 
 
 **`Files`**
 
-Browse files in the sidebar. Left-click a folder to expand or collapse it. Left-click a file, or right-click a file or folder, to paste its quoted path into chat. Click the label or `[project]` to open the file-root picker: switch the tree root, favorite the highlighted directory with Ctrl+F, and pick recent dirs. Recents and favorites are stored in the project `.config/openSidebar.json` (shared across sessions). Type in the picker to search file and folder names under the project, your recents, and your favorites using [Everything](https://www.voidtools.com/) (`es.exe` on PATH, with the Everything app running). Matches appear directly under the search box; clearing the box restores the usual project, favorite, and recent rows.
+Browse files right in the sidebar. Folders expand on left-click. Left-click a file, or right-click anything, to paste its quoted path into chat. Current directory tries to auto-set based on how the OpenCode session was started, but this can also be manually entered by clicking on the files header.
 
-When launched with `oc <directory>`, a fresh session uses the project name. The
-first duplicate gets a numeric suffix such as `openSidebar1`, followed by
-`openSidebar2` as needed. Existing sessions are never renamed. The Files and
-Scripts sections use the stored project directory automatically.
+Built in search levereges Everything by Void Tools to quickly search files/folders in your active OpenCode session directory.
 
-### Configuration
-
-The sidebar shows MCP and LSP sections by default. To hide either section without
-disabling its underlying service, create `%USERPROFILE%\.config\openSidebar\config.json`:
-
-```json
-{
-  "showMcp": false,
-  "showLsp": true
-}
-```
-
-Project-specific overrides go in `.config\openSidebar.json` under the project. The
-sidebar loads user settings first, then overlays project values when that file exists;
-values missing from the project file continue to come from the user config. Use
-`config.example.json` as a reference for the currently configurable settings.
-`projectDirectory` sets the directory used by Files and Scripts independently of the
-OpenCode session directory. Script pins, file-root history, favorite roots,
-recent file roots, and per-session active roots are also stored there. OpenCode-owned settings such as
-sessions, models, MCP services, LSP services, and authentication remain in OpenCode.
-The initial `cd <directory>` prompt may be quoted by the terminal; openSidebar accepts
-that form when locating the project's config.
 
 ## Install
 1. Open `%USERPROFILE%\.config\opencode\tui.json`
@@ -81,7 +49,3 @@ that form when locating the project's config.
 { "plugin": ["open-sidebar"] }
 ```
 3. Restart OpenCode.
-
-## Screenshot
-
-<img src=".res/scr/1.png" width="300">
