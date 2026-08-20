@@ -92,7 +92,7 @@ function spawnWezterm(commandArgs: string[], cwd: string): Promise<{ paneID?: st
 }
 
 export function weztermSendArgs(script: Script, paneID: string, submit: boolean): string[] {
-  return ["cli", "send-text", "--pane-id", paneID, "--no-paste", `${scriptCommand(script)}${submit ? "\r" : ""}`]
+  return ["cli", "send-text", "--pane-id", paneID, "--no-paste", `$env:SCRIPT_OWN_PANE='1'; ${scriptCommand(script)}${submit ? "\r" : ""}`]
 }
 
 async function runWezterm(script: Script, cwd: string, terminal: Exclude<ScriptTerminal, "native">, submit: boolean): Promise<RunResult> {
@@ -125,3 +125,4 @@ export async function placeScript(script: Script, cwd: string): Promise<RunResul
 export function commandArgs(command: string): string[] {
   return shellArgs(command)
 }
+

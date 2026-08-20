@@ -115,7 +115,7 @@ function closeOut {
         writeClearedLine -Text 'closing...' -PadWidth $pad.Length
     }
     try {
-        if ($env:WEZTERM_PANE -and $weztermExe) { & $weztermExe @('cli', 'kill-pane', '--pane-id', $env:WEZTERM_PANE) }
+        if ($env:SCRIPT_OWN_PANE -and $env:WEZTERM_PANE -and $weztermExe) { & $weztermExe @('cli', 'kill-pane', '--pane-id', $env:WEZTERM_PANE) }
     } catch { }
     [Environment]::Exit(0)
 }

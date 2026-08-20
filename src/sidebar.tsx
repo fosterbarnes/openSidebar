@@ -1164,11 +1164,14 @@ return showRemaining()
         const session = api.state.session.get(props.session_id)
         const directory = session?.directory || api.state.path.directory
         const branch = session?.directory === api.state.path.directory ? api.state.vcs?.branch : undefined
+        const displayVersion = "displayVersion" in api.app && typeof api.app.displayVersion === "string" && api.app.displayVersion
+          ? api.app.displayVersion
+          : api.app.version
         return (
           <box gap={1}>
             <text>{footerPath(directory, os.homedir(), branch)}</text>
             <text fg={api.theme.current.textMuted}>
-              <span style={{ fg: api.theme.current.success }}>-</span> OpenCode {api.app.version}
+              <span style={{ fg: api.theme.current.success }}>-</span> OpenCode {displayVersion}
             </text>
           </box>
         )

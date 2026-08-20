@@ -277,8 +277,8 @@ test("maps WezTerm terminal choices to CLI placement arguments", () => {
 
 test("places commands without submitting them and submits only when running", () => {
   const script = { name: "build", command: "npm run build", terminal: "wezterm-tab" as const, launcher: { executable: "pwsh", args: [] }, weztermSize: { Percent: 50 } }
-  assert.deepEqual(weztermSendArgs(script, "7", false), ["cli", "send-text", "--pane-id", "7", "--no-paste", "npm run build"])
-  assert.deepEqual(weztermSendArgs(script, "7", true), ["cli", "send-text", "--pane-id", "7", "--no-paste", "npm run build\r"])
+  assert.deepEqual(weztermSendArgs(script, "7", false), ["cli", "send-text", "--pane-id", "7", "--no-paste", "$env:SCRIPT_OWN_PANE='1'; npm run build"])
+  assert.deepEqual(weztermSendArgs(script, "7", true), ["cli", "send-text", "--pane-id", "7", "--no-paste", "$env:SCRIPT_OWN_PANE='1'; npm run build\r"])
 })
 
 test("discovers only enabled configured script extensions", () => {
