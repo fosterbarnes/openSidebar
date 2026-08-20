@@ -5,7 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { BUILTIN_SHELLS, clearCursorSessionToken, defaultScriptSettings, defaultSidebarSettings, dedupeRootPaths, displayPath, isDirectory, loadSidebarSettings, normalizeExtension, normalizeRootPath, normalizeScriptSettings, parseLauncher, readCursorSessionToken, readScripts, readTree, rootSections, runEverythingSearch, sameRootPath, saveSidebarSettings, saveUserScriptSettings, sessionProjectDirectory, sidebarConfigPaths, updateLanguage, WEZTERM_TERMINALS, writeCursorSessionToken, type Script, type ScriptLanguage, type ScriptSettings, type SidebarSettings, type WezTermSplitSize } from "./helpers.js"
 import { cursorSessionCookie, probeCursorUsage, probeOpenAIUsage, probeOpenCodeGoUsage, probeOpenRouterUsage, type CursorUsage, type OpenAIUsage, type OpenCodeGoUsage, type OpenRouterUsage } from "./usage.js"
-import { runScript as runNativeScript, scriptCommand } from "./script-runner.js"
+import { copyToClipboard, fileClipboardText, runScript as runNativeScript, scriptClipboardText, scriptCommand } from "./script-runner.js"
 
 const DIRECTORY_COLORS = ["#F7E9B5", "#F4E1A0", "#F1D98B", "#EED076", "#EBC861"]
 const DIRECTORY_INDICATOR_COLORS = ["#DCCF99", "#D5C184", "#CEB56F", "#C7A95A", "#C09D45"]
@@ -601,6 +601,12 @@ return showRemaining()
   }
   const pasteScript = (sessionID: string, script: Script) => {
     insertChatText(sessionID, script.filePath ? `'${script.filePath}'` : scriptCommand(script))
+  }
+  const copyText = async (text: string) => {
+    const result = await copyToClipboard(text)
+    api.ui.toast(result.error
+      ? { variant: "error", message: `Could not copy to clipboard: ${result.error}` }
+      : { variant: "success", message: "Copied to clipboard" })
   }
   const cycleVariant = (sessionID: string) => {
     promptRefs.get(sessionID)?.focus()
@@ -1289,7 +1295,10 @@ return showRemaining()
                   onMouseOver={() => setHovered(`script:${script.name}`)}
                   onMouseOut={() => setHovered()}
                   onMouseDown={(event) => {
-                     if (event.button === 2) pasteScript(props.session_id, script)
+                    if (event.button === 2) {
+                      pasteScript(props.session_id, script)
+                      void copyText(scriptClipboardText(script))
+                    }
                     else if (event.button === 0) runScript(script)
                   }}
                 >
@@ -1351,6 +1360,7 @@ return showRemaining()
                     onMouseDown={(event) => {
                       if (event.button === 2) {
                         insertPath(props.session_id, entry.fullPath, true)
+                        void copyText(fileClipboardText(entry.fullPath))
                         return
                       }
                       if (entry.directory) toggleDirectory(entry.relativePath)

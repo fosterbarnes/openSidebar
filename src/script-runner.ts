@@ -4,6 +4,10 @@ import path from "node:path"
 import type { Script, ScriptLauncher, ScriptTerminal, WezTermSplitSize } from "./helpers.js"
 
 export type RunResult = { target: string; error?: string }
+export type ClipboardSpawn = (command: string, args: string[]) => {
+  stdin: { end(data: string): void }
+  once(event: "error" | "close", listener: (value?: Error | number | null) => void): void
+}
 
 function available(command: string): Promise<boolean> {
   if (path.isAbsolute(command)) return Promise.resolve(existsSync(command))
@@ -58,6 +62,31 @@ function launchArgs(launcher: ScriptLauncher, target: string): string[] {
 
 function quoteCommandArg(value: string): string {
   return `'${value.replaceAll("'", "''")}'`
+}
+
+export function scriptClipboardText(script: Script): string {
+  if (!script.filePath) return script.command
+  const executable = path.basename(script.launcher.executable).toLowerCase().replace(/\.exe$/, "")
+  return executable === "pwsh" || executable === "powershell"
+    ? `& ${quoteCommandArg(script.filePath)}`
+    : scriptCommand(script)
+}
+
+export function fileClipboardText(filePath: string): string {
+  return quoteCommandArg(filePath)
+}
+
+export function copyToClipboard(
+  text: string,
+  spawnImpl: ClipboardSpawn = (command, args) => spawn(command, args, { windowsHide: true }),
+): Promise<RunResult> {
+  if (process.platform !== "win32") return Promise.resolve({ target: "Clipboard", error: "Clipboard copying requires Windows." })
+  return new Promise((resolve) => {
+    const child = spawnImpl("clip.exe", [])
+    child.once("error", (error) => resolve({ target: "Clipboard", error: error instanceof Error ? error.message : "Could not access the clipboard." }))
+    child.once("close", (code) => resolve(code === 0 ? { target: "Clipboard" } : { target: "Clipboard", error: `Clipboard exited with code ${code ?? "unknown"}.` }))
+    child.stdin.end(text)
+  })
 }
 
 export function scriptCommand(script: Script): string {
@@ -125,4 +154,3 @@ export async function placeScript(script: Script, cwd: string): Promise<RunResul
 export function commandArgs(command: string): string[] {
   return shellArgs(command)
 }
-

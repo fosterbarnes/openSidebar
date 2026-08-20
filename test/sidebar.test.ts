@@ -6,7 +6,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { defaultScriptSettings, displayPath, everythingSearchArgs, everythingSearchQuery, loadSidebarSettings, MAX_RECENT_ROOTS, normalizeExtension, normalizeRootPath, normalizeSidebarSettings, normalizeScriptSettings, parseLauncher, promptProjectDirectory, readCursorSessionToken, readScripts, readTree, rootPathKey, rootSections, runEverythingSearch, sameRootPath, saveSidebarSettings, saveUserScriptSettings, sessionProjectDirectory, sidebarConfigPaths, writeCursorSessionToken, clearCursorSessionToken, cursorSessionSecretPath } from "../src/helpers.ts"
 import { cursorSessionCookie, cursorDbPath, probeCursorUsage, probeOpenAIUsage, probeOpenCodeGoUsage, probeOpenRouterUsage, resolveAuthPath } from "../src/usage.ts"
-import { commandArgs, scriptCommand, weztermArgs, weztermSendArgs } from "../src/script-runner.ts"
+import { commandArgs, copyToClipboard, fileClipboardText, scriptClipboardText, scriptCommand, weztermArgs, weztermSendArgs } from "../src/script-runner.ts"
 
 test("reads sorted package scripts", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "sidebar-tools-"))
@@ -266,6 +266,34 @@ test("normalizes WezTerm split sizes and inherits missing defaults", () => {
 test("builds shell commands for package and language scripts", () => {
   assert.equal(scriptCommand({ name: "build", command: "npm run build", terminal: "native", launcher: { executable: "pwsh", args: [] }, weztermSize: { Percent: 50 } }), "npm run build")
   assert.equal(scriptCommand({ name: "run.ps1", command: "", filePath: "C:\\work\\safe folder\\run.ps1", terminal: "native", launcher: { executable: "pwsh", args: ["-File"] }, weztermSize: { Percent: 50 } }), "pwsh '-File' 'C:\\work\\safe folder\\run.ps1'")
+})
+
+test("formats script and file clipboard text", () => {
+  const powershell = { name: "push.ps1", command: "", filePath: "C:\\work\\safe folder\\push.ps1", terminal: "native" as const, launcher: { executable: "pwsh", args: ["-File"] }, weztermSize: { Percent: 50 } }
+  const python = { ...powershell, name: "run.py", filePath: "C:\\work\\run.py", launcher: { executable: "python", args: [] } }
+  assert.equal(scriptClipboardText(powershell), "& 'C:\\work\\safe folder\\push.ps1'")
+  assert.equal(scriptClipboardText(python), "python 'C:\\work\\run.py'")
+  assert.equal(fileClipboardText("C:\\work\\notes.txt"), "'C:\\work\\notes.txt'")
+})
+
+test("writes clipboard text through clip.exe", async () => {
+  let command = ""
+  let args: string[] = []
+  let input = ""
+  const result = await copyToClipboard("'C:\\work\\notes.txt'", (nextCommand, nextArgs) => {
+    command = nextCommand
+    args = nextArgs
+    return {
+      stdin: { end(data: string) { input = data } },
+      once(event: "error" | "close", listener: (value?: Error | number | null) => void) {
+        if (event === "close") listener(0)
+      },
+    }
+  })
+  assert.deepEqual(result, { target: "Clipboard" })
+  assert.equal(command, "clip.exe")
+  assert.deepEqual(args, [])
+  assert.equal(input, "'C:\\work\\notes.txt'")
 })
 
 test("maps WezTerm terminal choices to CLI placement arguments", () => {

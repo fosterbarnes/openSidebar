@@ -26,4 +26,5 @@ try {
 finally {
     Pop-Location
 }
+closeOut 3
 

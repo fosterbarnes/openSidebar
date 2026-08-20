@@ -1,3 +1,4 @@
-v1.2.15 release
+v1.2.16 release
 
-Finalize tui install method and fix install instructions
+- Right-clicking scripts now also adds a command to run the script into clipboard
+- Right-clicking files now also copies the quoted full path
