@@ -39,28 +39,13 @@ Quickly run or reference project scripts. Left-click a script to run it, right-c
 
 Browse files right in the sidebar. Folders expand on left-click. Left-click a file, or right-click anything, to paste its quoted path into chat. Current directory tries to auto-set based on how the OpenCode session was started, but this can also be manually entered by clicking on the files header.
 
-Built in search levereges Everything by Void Tools to quickly search files/folders in your active OpenCode session directory.
+Built in search leverages Everything by Void Tools to quickly search files/folders in your active OpenCode session directory.
 
 
 ## Install
-
-TUI plugins belong in **`tui.json`**, not `opencode.json` / `opencode.jsonc`.
-
-**Recommended**
 
 ```powershell
 opencode plugin -g open-sidebar
 ```
 
-**Manual**
-
-1. Open or create `%USERPROFILE%\.config\opencode\tui.json`
-2. Add `"open-sidebar"` to the existing `"plugin"` array (merge; do not replace the whole file). Example fragment:
-
-```json
-"plugin": ["open-sidebar"]
-```
-
-3. Restart OpenCode.
-
-After a release you can pin, for example `"open-sidebar@1.2.14"`.
+Restart OpenCode.

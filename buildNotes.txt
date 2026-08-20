@@ -1,3 +1,3 @@
-v1.2.14 release
+v1.2.15 release
 
-- Start fix on broken install method
+Finalize tui install method and fix install instructions

@@ -3,6 +3,7 @@ import test from "node:test"
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 import { defaultScriptSettings, displayPath, everythingSearchArgs, everythingSearchQuery, loadSidebarSettings, MAX_RECENT_ROOTS, normalizeExtension, normalizeRootPath, normalizeSidebarSettings, normalizeScriptSettings, parseLauncher, promptProjectDirectory, readCursorSessionToken, readScripts, readTree, rootPathKey, rootSections, runEverythingSearch, sameRootPath, saveSidebarSettings, saveUserScriptSettings, sessionProjectDirectory, sidebarConfigPaths, writeCursorSessionToken, clearCursorSessionToken, cursorSessionSecretPath } from "../src/helpers.ts"
 import { cursorSessionCookie, cursorDbPath, probeCursorUsage, probeOpenAIUsage, probeOpenCodeGoUsage, probeOpenRouterUsage, resolveAuthPath } from "../src/usage.ts"
 import { commandArgs, scriptCommand, weztermArgs, weztermSendArgs } from "../src/script-runner.ts"
@@ -954,5 +955,13 @@ test("moves a Cursor session token out of config.json into the secrets file", ()
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test("package.json exposes npm TUI entry for OpenCode", () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
+  const pkg = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8"))
+  assert.equal(pkg.exports?.["./tui"], "./dist/sidebar.js")
+  assert.equal("main" in pkg, false)
+  assert.ok(String(pkg.engines?.opencode ?? "").includes("1.18"))
 })
 

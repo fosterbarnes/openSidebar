@@ -15,6 +15,13 @@ try {
     if ($package.version -ne $lockVersion -or $package.version -ne $lockRootVersion) {
         throw "package.json and package-lock.json versions are out of sync."
     }
+    if ($null -ne $package.main) {
+        throw "package.json must not set main; TUI npm plugins use exports['./tui'] only."
+    }
+    $tuiExport = $package.exports.PSObject.Properties['./tui'].Value
+    if ([string]::IsNullOrWhiteSpace([string]$tuiExport)) {
+        throw "package.json must export ./tui for OpenCode TUI plugin install."
+    }
     if (-not (Test-Path -LiteralPath "dist/sidebar.js")) {
         throw "dist/sidebar.js is missing. Run .scripts/build.ps1 first."
     }
