@@ -1,4 +1,3 @@
-v1.2.16 release
+v1.2.17 release
 
-- Right-clicking scripts now also adds a command to run the script into clipboard
-- Right-clicking files now also copies the quoted full path
+- Fix github actions
